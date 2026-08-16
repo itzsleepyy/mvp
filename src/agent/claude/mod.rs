@@ -33,6 +33,7 @@ mod config;
 use std::path::Path;
 
 use crate::agent::event::AgentEvent;
+use crate::agent::integrations::ProviderStatus;
 use crate::ipc;
 
 pub use config::{ClaudeConfig, config_path};
@@ -173,6 +174,37 @@ pub fn status() {
 
 fn plural(n: usize) -> &'static str {
     if n == 1 { "" } else { "s" }
+}
+
+/// Structured status used by the `integrations` overview.
+pub fn status_state() -> ProviderStatus {
+    match ClaudeConfig::load(&config_path()) {
+        Ok(config) => {
+            let status = config.hook_status();
+            match status.completeness() {
+                (0, _) => ProviderStatus::NotInstalled,
+                (installed, total) if installed == total => ProviderStatus::Current,
+                (installed, total) => {
+                    ProviderStatus::Outdated(format!("{installed}/{total} hooks up to date"))
+                }
+            }
+        }
+        Err(err) => ProviderStatus::Broken(err),
+    }
+}
+
+/// True when any WaitState pieces exist but are missing/stale.
+pub fn needs_repair() -> bool {
+    matches!(status_state(), ProviderStatus::Outdated(_))
+}
+
+/// True when the Claude CLI or its config directory is present.
+pub fn detected() -> bool {
+    crate::agent::integrations::command_on_path("claude") || config_dir_present()
+}
+
+fn config_dir_present() -> bool {
+    config_path().parent().is_some_and(|dir| dir.exists())
 }
 
 /// The user-level Claude settings file, honouring `CLAUDE_CONFIG_DIR`.

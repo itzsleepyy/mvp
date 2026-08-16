@@ -1,6 +1,8 @@
 //! Safe merging of WaitState hooks into the Claude Code settings file.
 //!
-//! Hard requirements honoured here:
+//! Claude-specific parts (the hook table, handler shape, ownership
+//! detection) live here; the destructive-edit-safety lives in
+//! [`crate::agent::hooks_json`]:
 //! - the existing configuration is never replaced or reordered destructively
 //! - unrelated hooks, permissions, plugins and settings stay untouched
 //! - a backup is written before any modification
@@ -13,6 +15,7 @@ use serde_json::{Value, json};
 
 use crate::agent::claude::HOOKS;
 use crate::agent::event::AgentEvent;
+use crate::agent::hooks_json::{HookSpec, HooksJson};
 
 /// The user-level Claude Code settings file, honouring `CLAUDE_CONFIG_DIR`.
 pub fn config_path() -> PathBuf {
@@ -38,11 +41,22 @@ impl HookStatus {
     }
 }
 
+/// The hook specs for the shared merge machinery.
+pub fn hook_specs() -> Vec<HookSpec> {
+    HOOKS
+        .iter()
+        .map(|entry| HookSpec {
+            event: entry.event,
+            matcher: entry.matcher,
+            agent_event: entry.agent_event,
+        })
+        .collect()
+}
+
 /// A parsed Claude settings file, loaded for merging.
 #[derive(Debug)]
 pub struct ClaudeConfig {
-    path: PathBuf,
-    data: Value,
+    inner: HooksJson,
 }
 
 impl ClaudeConfig {
@@ -50,21 +64,8 @@ impl ClaudeConfig {
     /// file will be created on save). A malformed file is an error and is
     /// never modified.
     pub fn load(path: &Path) -> Result<Self, String> {
-        let data = match std::fs::read(path) {
-            Ok(bytes) => {
-                let value: Value = serde_json::from_slice(&bytes)
-                    .map_err(|e| format!("cannot parse {}: {e}", path.display()))?;
-                if !value.is_object() {
-                    return Err(format!("{} does not contain a JSON object", path.display()));
-                }
-                value
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => json!({}),
-            Err(e) => return Err(format!("cannot read {}: {e}", path.display())),
-        };
         Ok(Self {
-            path: path.to_path_buf(),
-            data,
+            inner: HooksJson::load(path)?,
         })
     }
 
@@ -72,178 +73,37 @@ impl ClaudeConfig {
     /// of changes made (0 when already installed). Existing hooks and all
     /// other settings are preserved.
     pub fn install_hooks(&mut self, binary: &Path) -> usize {
-        let binary = binary.display().to_string();
-        let mut changes = 0;
-        for entry in HOOKS {
-            if self.merge_entry(entry.event, entry.matcher, entry.agent_event, &binary) {
-                changes += 1;
-            }
-        }
-        changes
+        self.inner.install(
+            &hook_specs(),
+            &binary.display().to_string(),
+            claude_handler,
+            is_waitstate_for,
+        )
     }
 
     /// Removes every WaitState-owned hook. Returns the number removed.
     /// Handlers are identified by the executable name (`waitstate`) plus
     /// the `agent-event` argument, so a moved binary is still recognised.
     pub fn uninstall_hooks(&mut self) -> usize {
-        let mut removed = 0;
-        let Some(hooks) = self.data.get_mut("hooks").and_then(Value::as_object_mut) else {
-            return 0;
-        };
-        for groups in hooks.values_mut() {
-            let Some(groups) = groups.as_array_mut() else {
-                continue;
-            };
-            for group in groups.iter_mut() {
-                let Some(handlers) = group.get_mut("hooks").and_then(Value::as_array_mut) else {
-                    continue;
-                };
-                removed += handlers.len() - handlers.iter().filter(|h| !is_waitstate(h)).count();
-                handlers.retain(|h| !is_waitstate(h));
-            }
-            // Drop now-empty matcher groups so we leave no WaitState residue.
-            groups.retain(|group| {
-                group
-                    .get("hooks")
-                    .and_then(Value::as_array)
-                    .is_some_and(|handlers| !handlers.is_empty())
-            });
-        }
-        // Drop now-empty event arrays.
-        hooks.retain(|_, groups| groups.as_array().is_some_and(|g| !g.is_empty()));
-        // Drop the whole "hooks" key when nothing remains, restoring the
-        // config to exactly its pre-install shape.
-        if hooks.is_empty() {
-            self.data
-                .as_object_mut()
-                .expect("config is an object")
-                .remove("hooks");
-        }
-        removed
+        self.inner.uninstall(is_waitstate)
     }
 
     /// True when all hook events have an up-to-date WaitState hook.
     pub fn hook_status(&self) -> HookStatus {
-        let installed = HOOKS
-            .iter()
-            .filter(|entry| self.find_handler(entry.event, entry.agent_event).is_some())
-            .count();
-        HookStatus {
-            installed,
-            total: HOOKS.len(),
-        }
+        let (installed, total) = self.inner.status(&hook_specs(), is_waitstate_for);
+        HookStatus { installed, total }
     }
 
     /// Writes the settings back, creating a timestamped backup of the
     /// previous file first. The write is atomic (temp file + rename).
     pub fn save(&self) -> Result<(), String> {
-        if let Some(dir) = self.path.parent() {
-            std::fs::create_dir_all(dir)
-                .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
-        }
-        if self.path.exists() {
-            let stamp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-            let backup = self
-                .path
-                .with_file_name(format!("settings.json.ws-backup-{stamp}"));
-            std::fs::copy(&self.path, &backup).map_err(|e| {
-                format!(
-                    "cannot back up {} to {}: {e}",
-                    self.path.display(),
-                    backup.display()
-                )
-            })?;
-        }
-        let json = serde_json::to_string_pretty(&self.data)
-            .map_err(|e| format!("cannot serialise settings: {e}"))?;
-        let tmp = self.path.with_file_name("settings.json.ws-tmp");
-        std::fs::write(&tmp, json).map_err(|e| format!("cannot write {}: {e}", tmp.display()))?;
-        std::fs::rename(&tmp, &self.path)
-            .map_err(|e| format!("cannot write {}: {e}", self.path.display()))?;
-        Ok(())
-    }
-
-    /// Merges one hook entry: updates an existing WaitState handler (stale
-    /// binary path), or appends a handler to a matcher-compatible group, or
-    /// creates a fresh group. Returns true when the file changed.
-    fn merge_entry(
-        &mut self,
-        event: &str,
-        matcher: Option<&str>,
-        agent_event: AgentEvent,
-        binary: &str,
-    ) -> bool {
-        if let Some(handler) = self.find_handler_mut(event, agent_event) {
-            if handler.get("command").and_then(Value::as_str) == Some(binary) {
-                return false; // already installed and up to date
-            }
-            handler["command"] = Value::String(binary.to_string());
-            return true; // stale binary path updated
-        }
-
-        let handler = hook_handler(binary, agent_event);
-        let groups = self.ensure_event_groups(event);
-        for group in groups.iter_mut() {
-            let group_matcher = group.get("matcher").and_then(Value::as_str);
-            if group_matcher == matcher {
-                group["hooks"]
-                    .as_array_mut()
-                    .expect("groups carry hooks arrays")
-                    .push(handler);
-                return true;
-            }
-        }
-        let mut group = json!({ "hooks": [handler] });
-        if let Some(m) = matcher {
-            group["matcher"] = Value::String(m.to_string());
-        }
-        groups.push(group);
-        true
-    }
-
-    fn ensure_event_groups(&mut self, event: &str) -> &mut Vec<Value> {
-        let hooks = self
-            .data
-            .as_object_mut()
-            .expect("config is an object")
-            .entry("hooks")
-            .or_insert_with(|| json!({}));
-        let hooks = hooks.as_object_mut().expect("hooks is an object");
-        hooks
-            .entry(event)
-            .or_insert_with(|| json!([]))
-            .as_array_mut()
-            .expect("hook events hold arrays")
-    }
-
-    fn find_handler(&self, event: &str, agent_event: AgentEvent) -> Option<&Value> {
-        let groups = self.data.get("hooks")?.get(event)?.as_array()?;
-        groups.iter().find_map(|group| {
-            group
-                .get("hooks")?
-                .as_array()?
-                .iter()
-                .find(|h| is_waitstate_for(h, agent_event))
-        })
-    }
-
-    fn find_handler_mut(&mut self, event: &str, agent_event: AgentEvent) -> Option<&mut Value> {
-        let groups = self.data.get_mut("hooks")?.get_mut(event)?.as_array_mut()?;
-        groups.iter_mut().find_map(|group| {
-            group
-                .get_mut("hooks")?
-                .as_array_mut()?
-                .iter_mut()
-                .find(|h| is_waitstate_for(h, agent_event))
-        })
+        self.inner.save()
     }
 }
 
-/// The exec-form command handler that sends one agent event.
-fn hook_handler(binary: &str, event: AgentEvent) -> Value {
+/// The exec-form command handler that sends one agent event. Claude Code
+/// supports a `command` + `args` array, so no shell quoting is needed.
+fn claude_handler(binary: &str, event: AgentEvent) -> Value {
     json!({
         "type": "command",
         "command": binary,
