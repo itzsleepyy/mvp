@@ -9,7 +9,8 @@ use crate::agent::{AgentDisplay, AgentKind, AgentStatus};
 use crate::app::{App, AppState, PauseReason};
 use crate::game::obstacle::ObstacleKind;
 use crate::game::scoring::format_score;
-use crate::game::{self, GameRenderState, StackJump};
+use crate::game::twenty_one::{Card, Outcome, Phase, Suit, TwentyOne};
+use crate::game::{self, ActiveGame, GameKind, GameRenderState, StackJump};
 
 /// Vertical space consumed by chrome: top/bottom borders (2), HUD (1) and
 /// controls footer (1). Everything else is playfield.
@@ -30,6 +31,7 @@ pub fn render(frame: &mut Frame, app: &App) {
     }
     match app.state {
         AppState::Menu => render_menu(frame, app),
+        AppState::GameMenu => render_game_menu(frame, app),
         AppState::Playing
         | AppState::PausedManual
         | AppState::PausedAgent(_)
@@ -95,6 +97,53 @@ fn render_menu(frame: &mut Frame, app: &App) {
     frame.render_widget(paragraph, vertical[1]);
 }
 
+// ---- game menu ------------------------------------------------------------
+
+fn render_game_menu(frame: &mut Frame, app: &App) {
+    let area = frame.area();
+
+    let magenta = Style::new().fg(Color::Magenta);
+    let dim = Style::new().fg(Color::DarkGray);
+    let white = Style::new().fg(Color::White);
+    let selected_style = Style::new().fg(Color::Green).add_modifier(Modifier::BOLD);
+    let best_style = Style::new().fg(Color::Yellow);
+
+    let mut lines: Vec<Line<'_>> = Vec::new();
+    lines.push(Line::styled(
+        "CHOOSE YOUR GAME",
+        magenta.add_modifier(Modifier::BOLD),
+    ));
+    lines.push(Line::from(""));
+    for kind in GameKind::ALL {
+        let selected = kind == app.selected_kind();
+        let marker = if selected { "▶" } else { " " };
+        lines.push(Line::from(vec![
+            Span::styled(marker, selected_style),
+            Span::raw(" "),
+            Span::styled(kind.title(), if selected { selected_style } else { white }),
+            Span::raw("  "),
+            Span::styled(kind.blurb(), dim),
+            Span::raw("  "),
+            Span::styled(
+                format!("BEST {}", format_score(app.best_score_for(kind))),
+                best_style,
+            ),
+        ]));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::styled("↑/↓ SELECT    ENTER PLAY    ESC BACK", dim));
+
+    let total = lines.len() as u16;
+    let vertical = Layout::vertical([
+        Constraint::Length(area.height.saturating_sub(total) / 2),
+        Constraint::Length(total),
+        Constraint::Min(0),
+    ])
+    .split(area);
+    let paragraph = Paragraph::new(lines).alignment(Alignment::Center);
+    frame.render_widget(paragraph, vertical[1]);
+}
+
 // ---- game ----------------------------------------------------------------
 
 fn render_game(frame: &mut Frame, app: &App) {
@@ -102,6 +151,13 @@ fn render_game(frame: &mut Frame, app: &App) {
         render_menu(frame, app);
         return;
     };
+    match game {
+        ActiveGame::StackJump(game) => render_stack_jump(frame, app, game),
+        ActiveGame::TwentyOne(game) => render_twenty_one(frame, app, game),
+    }
+}
+
+fn render_stack_jump(frame: &mut Frame, app: &App, game: &StackJump) {
     let area = frame.area();
 
     let block = Block::bordered()
@@ -130,9 +186,237 @@ fn render_game(frame: &mut Frame, app: &App) {
 
     match app.state {
         AppState::PausedManual => render_paused(frame, area, app),
-        AppState::PausedAgent(reason) => render_agent_paused(frame, area, app, reason, game),
-        AppState::GameOver => render_game_over(frame, area, game, app),
-        AppState::Playing | AppState::Menu => {}
+        AppState::PausedAgent(reason) => render_agent_paused(frame, area, app, reason),
+        AppState::GameOver => render_game_over(frame, area, app),
+        AppState::Playing | AppState::Menu | AppState::GameMenu => {}
+    }
+}
+
+// ---- twenty one -----------------------------------------------------------
+
+const CARD_WIDTH: u16 = 7;
+const CARD_HEIGHT: u16 = 5;
+
+fn render_twenty_one(frame: &mut Frame, app: &App, game: &TwentyOne) {
+    let area = frame.area();
+
+    let block = Block::bordered()
+        .border_style(Style::new().fg(Color::DarkGray))
+        .title(Line::styled(
+            " TWENTY ONE ",
+            Style::new().fg(Color::Magenta),
+        ));
+    let inner = block.inner(area);
+    let layout = Layout::vertical([
+        Constraint::Length(1), // HUD
+        Constraint::Length(1), // dealer label
+        Constraint::Length(CARD_HEIGHT),
+        Constraint::Length(1), // gap
+        Constraint::Length(1), // player label
+        Constraint::Length(CARD_HEIGHT),
+        Constraint::Min(1),    // status
+        Constraint::Length(1), // footer
+    ])
+    .split(inner);
+
+    frame.render_widget(twenty_one_hud(game, app), layout[0]);
+    frame.render_widget(hand_label("DEALER", game.dealer_value()), layout[1]);
+    render_cards(frame.buffer_mut(), layout[2], dealer_cards(game));
+    frame.render_widget(hand_label("YOU", Some(game.player_value())), layout[4]);
+    render_cards(frame.buffer_mut(), layout[5], player_cards(game));
+    frame.render_widget(twenty_one_status(game), layout[6]);
+    frame.render_widget(twenty_one_controls(), layout[7]);
+    frame.render_widget(block, area);
+
+    match app.state {
+        AppState::PausedManual => render_paused(frame, area, app),
+        AppState::PausedAgent(reason) => render_agent_paused(frame, area, app, reason),
+        AppState::GameOver => render_game_over(frame, area, app),
+        AppState::Playing | AppState::Menu | AppState::GameMenu => {}
+    }
+}
+
+fn twenty_one_hud(game: &TwentyOne, app: &App) -> Paragraph<'static> {
+    let chips = Span::styled(
+        format!("CHIPS {}", format_score(game.chips())),
+        Style::new().fg(Color::White).add_modifier(Modifier::BOLD),
+    );
+    let bet = Span::styled(
+        format!("BET {}", format_score(crate::game::twenty_one::BET)),
+        Style::new().fg(Color::DarkGray),
+    );
+    let best = Span::styled(
+        format!(
+            "BEST {}",
+            format_score(app.best_score_for(GameKind::TwentyOne).max(game.score()))
+        ),
+        Style::new().fg(Color::Yellow),
+    );
+    let record = Span::styled(
+        format!("W {} L {} P {}", game.wins(), game.losses(), game.pushes()),
+        Style::new().fg(Color::DarkGray),
+    );
+    let mut line = Line::from(vec![
+        chips,
+        Span::raw("   "),
+        bet,
+        Span::raw("   "),
+        best,
+        Span::raw("   "),
+        record,
+    ]);
+    if let Some(status) = agent_status_span(app) {
+        line.spans.insert(0, Span::raw("   "));
+        line.spans.insert(0, status);
+    }
+    Paragraph::new(line)
+}
+
+fn hand_label(name: &'static str, value: Option<u8>) -> Paragraph<'static> {
+    let name_span = Span::styled(
+        name,
+        Style::new().fg(Color::White).add_modifier(Modifier::BOLD),
+    );
+    let value_span = match value {
+        Some(v) => Span::styled(v.to_string(), Style::new().fg(Color::White)),
+        None => Span::styled("?", Style::new().fg(Color::DarkGray)),
+    };
+    Paragraph::new(Line::from(vec![name_span, Span::raw("   "), value_span]))
+}
+
+fn twenty_one_status(game: &TwentyOne) -> Paragraph<'static> {
+    let line = match game.phase() {
+        Phase::PlayerTurn => Line::styled(
+            "YOUR MOVE — H TO HIT, S TO STAND",
+            Style::new().fg(Color::DarkGray),
+        ),
+        Phase::RoundOver => {
+            let (outcome, style) = match game.outcome() {
+                Some(Outcome::Win) => (
+                    format!("YOU WIN +{}", format_score(crate::game::twenty_one::BET)),
+                    Style::new().fg(Color::Green).add_modifier(Modifier::BOLD),
+                ),
+                Some(Outcome::Blackjack) => (
+                    format!(
+                        "BLACKJACK! +{}",
+                        format_score(
+                            crate::game::twenty_one::BET + crate::game::twenty_one::BET / 2
+                        )
+                    ),
+                    Style::new().fg(Color::Green).add_modifier(Modifier::BOLD),
+                ),
+                Some(Outcome::Lose) => (
+                    format!(
+                        "DEALER WINS -{}",
+                        format_score(crate::game::twenty_one::BET)
+                    ),
+                    Style::new().fg(Color::Red),
+                ),
+                Some(Outcome::Push) => (
+                    "PUSH — BETS RETURNED".to_string(),
+                    Style::new().fg(Color::Yellow),
+                ),
+                None => (String::new(), Style::new().fg(Color::DarkGray)),
+            };
+            Line::from(vec![
+                Span::styled(outcome, style),
+                Span::raw("   "),
+                Span::styled("[ENTER] NEXT ROUND", Style::new().fg(Color::DarkGray)),
+            ])
+        }
+    };
+    Paragraph::new(line).alignment(Alignment::Center)
+}
+
+fn twenty_one_controls() -> Paragraph<'static> {
+    let dim = Style::new().fg(Color::DarkGray);
+    let line = Line::styled("H HIT    S STAND    P PAUSE    ESC MENU    Q QUIT", dim);
+    Paragraph::new(line).alignment(Alignment::Center)
+}
+
+enum CardFace<'a> {
+    Up(&'a Card),
+    Down,
+}
+
+fn dealer_cards(game: &TwentyOne) -> Vec<CardFace<'_>> {
+    game.dealer_hand()
+        .iter()
+        .enumerate()
+        .map(|(i, card)| {
+            if i == 1 && game.dealer_hole_hidden() {
+                CardFace::Down
+            } else {
+                CardFace::Up(card)
+            }
+        })
+        .collect()
+}
+
+fn player_cards(game: &TwentyOne) -> Vec<CardFace<'_>> {
+    game.player_hand().iter().map(CardFace::Up).collect()
+}
+
+/// Renders a row of playing cards, centered in `area` and clipped when the
+/// hand is too wide for the terminal.
+fn render_cards(buf: &mut Buffer, area: Rect, cards: Vec<CardFace<'_>>) {
+    if cards.is_empty() {
+        return;
+    }
+    let step = CARD_WIDTH + 1;
+    let total = cards.len() as u16 * step - 1;
+    let x = if total <= area.width {
+        area.x + (area.width - total) / 2
+    } else {
+        area.x
+    };
+    for (i, face) in cards.into_iter().enumerate() {
+        let cx = x + i as u16 * step;
+        if cx + CARD_WIDTH > area.right() {
+            break;
+        }
+        render_card(buf, cx, area.y, face);
+    }
+}
+
+/// Draws one 7×5 cell card: borders plus rank/suit, or a face-down back.
+fn render_card(buf: &mut Buffer, x: u16, y: u16, face: CardFace<'_>) {
+    let border = Style::new().fg(Color::DarkGray);
+    let back = Style::new().fg(Color::DarkGray);
+    let ink = match face {
+        CardFace::Down => Style::new().fg(Color::DarkGray),
+        CardFace::Up(card) => match card.suit {
+            Suit::Hearts | Suit::Diamonds => Style::new().fg(Color::Red),
+            Suit::Clubs | Suit::Spades => Style::new().fg(Color::White),
+        },
+    };
+
+    let mut rows: [String; CARD_HEIGHT as usize] = [
+        "┌─────┐".into(),
+        "│▒▒▒▒▒│".into(),
+        "│▒▒▒▒▒│".into(),
+        "│▒▒▒▒▒│".into(),
+        "└─────┘".into(),
+    ];
+    if let CardFace::Up(card) = face {
+        let label = card.rank.label();
+        let suit = card.suit.symbol();
+        rows[1] = format!("│{label:<2}   │");
+        rows[2] = format!("│  {suit}  │");
+        rows[3] = format!("│   {label:>2}│");
+    }
+
+    for (ry, text) in rows.iter().enumerate() {
+        for (rx, ch) in text.chars().enumerate() {
+            let Some(cell) = buf.cell_mut((x + rx as u16, y + ry as u16)) else {
+                continue;
+            };
+            cell.set_symbol(&ch.to_string()).set_style(match ch {
+                '┌' | '─' | '┐' | '│' | '└' | '┘' => border,
+                '▒' => back,
+                _ => ink,
+            });
+        }
     }
 }
 
@@ -316,33 +600,33 @@ fn render_paused(frame: &mut Frame, area: Rect, app: &App) {
 /// The agent-pause overlay: visually distinct from manual pause so the
 /// developer instantly knows *why* the game stopped and *which* agent is
 /// involved. With multiple agents the overlay names them all.
-fn render_agent_paused(
-    frame: &mut Frame,
-    area: Rect,
-    app: &App,
-    reason: PauseReason,
-    game: &StackJump,
-) {
+fn render_agent_paused(frame: &mut Frame, area: Rect, app: &App, reason: PauseReason) {
+    let game_kind = app.game().map(ActiveGame::kind);
+    let game_title = game_kind.map(GameKind::title).unwrap_or("Stack Jump");
+    let score_label = match game_kind {
+        Some(GameKind::TwentyOne) => "Chips",
+        _ => "Score",
+    };
     let (status, verb_one, verb_many, detail, restart_hint) = match reason {
         PauseReason::NeedsInput => (
             AgentStatus::NeedsInput,
             "NEEDS YOU",
             "NEED YOU",
-            "Stack Jump paused automatically",
+            format!("{game_title} paused automatically"),
             "Return to {agents}",
         ),
         PauseReason::Completed => (
             AgentStatus::Completed,
             "FINISHED",
             "FINISHED",
-            "Your run has been preserved",
+            "Your run has been preserved".to_string(),
             "Return to {agents}",
         ),
         PauseReason::Stopped => (
             AgentStatus::Stopped,
             "SESSION ENDED",
             "SESSIONS ENDED",
-            "Your run has been preserved",
+            "Your run has been preserved".to_string(),
             "Restart {agents} to resume",
         ),
     };
@@ -382,7 +666,10 @@ fn render_agent_paused(
     }
     lines.push(Line::from(""));
     lines.push(Line::styled(
-        format!("Score {}", format_score(game.score())),
+        format!(
+            "{score_label} {}",
+            format_score(app.game().map(ActiveGame::score).unwrap_or(0))
+        ),
         Style::new().fg(Color::White),
     ));
     lines.push(Line::from(""));
@@ -414,26 +701,56 @@ fn render_agent_paused(
     frame.render_widget(block, rect);
 }
 
-fn render_game_over(frame: &mut Frame, area: Rect, game: &StackJump, app: &App) {
+fn render_game_over(frame: &mut Frame, area: Rect, app: &App) {
+    let Some(game) = app.game() else {
+        return;
+    };
+
     let mut lines: Vec<Line<'static>> = vec![
         Line::styled(
             "GAME OVER",
             Style::new().fg(Color::Red).add_modifier(Modifier::BOLD),
         ),
         Line::from(""),
-        Line::styled(
-            format!("SCORE {}", format_score(game.score())),
-            Style::new().fg(Color::White),
-        ),
-        Line::styled(
-            format!("BEST  {}", format_score(app.best_score())),
-            Style::new().fg(Color::Yellow),
-        ),
-        Line::styled(
-            format!("TIME  {}", format_elapsed(game.elapsed())),
-            Style::new().fg(Color::DarkGray),
-        ),
     ];
+    match game {
+        ActiveGame::StackJump(game) => {
+            lines.push(Line::styled(
+                format!("SCORE {}", format_score(game.score())),
+                Style::new().fg(Color::White),
+            ));
+            lines.push(Line::styled(
+                format!("BEST  {}", format_score(app.best_score())),
+                Style::new().fg(Color::Yellow),
+            ));
+            lines.push(Line::styled(
+                format!("TIME  {}", format_elapsed(game.elapsed())),
+                Style::new().fg(Color::DarkGray),
+            ));
+        }
+        ActiveGame::TwentyOne(game) => {
+            lines.push(Line::styled(
+                format!("CHIPS {}", format_score(game.chips())),
+                Style::new().fg(Color::White),
+            ));
+            lines.push(Line::styled(
+                format!(
+                    "BEST  {}",
+                    format_score(app.best_score_for(GameKind::TwentyOne))
+                ),
+                Style::new().fg(Color::Yellow),
+            ));
+            lines.push(Line::styled(
+                format!(
+                    "WINS {}   LOSSES {}   PUSHES {}",
+                    game.wins(),
+                    game.losses(),
+                    game.pushes()
+                ),
+                Style::new().fg(Color::DarkGray),
+            ));
+        }
+    }
     if app.is_new_record() {
         lines.push(Line::styled(
             "NEW BEST!",
@@ -826,5 +1143,108 @@ mod tests {
         let text = all_text(&render_buffer(&app, 42, 14));
         assert!(text.contains("TERMINAL TOO SMALL"));
         assert!(text.contains("42×14"));
+    }
+
+    // ---- game menu ----------------------------------------------------------
+
+    #[test]
+    fn game_menu_render_lists_both_games() {
+        let mut app = app_at(100, 30);
+        app.handle_input(crate::event::AppInput::Confirm);
+        let text = all_text(&render_buffer(&app, 100, 30));
+        assert!(text.contains("CHOOSE YOUR GAME"));
+        assert!(text.contains("Stack Jump"));
+        assert!(text.contains("hop the obstacles"));
+        assert!(text.contains("Twenty One"));
+        assert!(text.contains("beat the dealer to 21"));
+        assert!(text.contains("ENTER PLAY"));
+        assert!(text.contains("ESC BACK"));
+    }
+
+    #[test]
+    fn game_menu_marker_follows_the_selection() {
+        use crate::event::AppInput;
+        let mut app = app_at(100, 30);
+        app.handle_input(AppInput::Confirm);
+        app.handle_input(AppInput::Down);
+        assert_eq!(app.selected_kind(), crate::game::GameKind::TwentyOne);
+        let text = all_text(&render_buffer(&app, 100, 30));
+        assert!(text.contains("▶ Twenty One"));
+        assert!(!text.contains("▶ Stack Jump"));
+    }
+
+    // ---- twenty one ---------------------------------------------------------
+
+    fn twenty_one_app_at(width: u16, height: u16) -> App {
+        use crate::event::AppInput;
+        let mut app = app_at(width, height);
+        app.handle_input(AppInput::Confirm); // Menu → GameMenu
+        app.handle_input(AppInput::Down); // select Twenty One
+        app.handle_input(AppInput::Confirm); // start
+        app
+    }
+
+    #[test]
+    fn twenty_one_render_shows_the_table() {
+        let mut app = twenty_one_app_at(100, 30);
+        app.setup_test_twenty_one_hands();
+        let text = all_text(&render_buffer(&app, 100, 30));
+        assert!(text.contains("TWENTY ONE"));
+        assert!(text.contains("CHIPS"));
+        assert!(text.contains("BET"));
+        assert!(text.contains("DEALER"));
+        assert!(text.contains("YOU"));
+        assert!(text.contains("H HIT"));
+        assert!(text.contains("S STAND"));
+        assert!(text.contains("┌"), "cards should be drawn:\n{text}");
+    }
+
+    #[test]
+    fn twenty_one_render_hides_the_dealer_hole() {
+        let mut app = twenty_one_app_at(100, 30);
+        app.setup_test_twenty_one_hands();
+        let text = all_text(&render_buffer(&app, 100, 30));
+        assert!(
+            text.contains("DEALER   ?"),
+            "hole must be face down:\n{text}"
+        );
+        assert!(text.contains("▒"), "hole card must show its back:\n{text}");
+    }
+
+    #[test]
+    fn twenty_one_pause_overlay_names_the_game_and_chips() {
+        let mut app = twenty_one_app_at(100, 30);
+        app.handle_agent_event(AgentKind::Codex, crate::agent::AgentEvent::NeedsInput);
+        let text = all_text(&render_buffer(&app, 100, 30));
+        assert!(text.contains("CODEX NEEDS YOU"));
+        assert!(text.contains("Twenty One paused automatically"));
+        assert!(text.contains("Chips"));
+    }
+
+    #[test]
+    fn twenty_one_game_over_render_shows_chips_and_record() {
+        let mut app = twenty_one_app_at(100, 30);
+        app.force_test_chips(crate::game::twenty_one::BET - 1);
+        app.handle_input(crate::event::AppInput::Confirm);
+        app.tick(std::time::Duration::from_millis(16));
+        assert_eq!(app.state, AppState::GameOver);
+        let text = all_text(&render_buffer(&app, 100, 30));
+        assert!(text.contains("GAME OVER"));
+        assert!(text.contains("CHIPS"));
+        assert!(text.contains("WINS"));
+        assert!(text.contains("PLAY AGAIN"));
+    }
+
+    #[test]
+    fn twenty_one_controls_differ_from_stack_jump() {
+        let twenty_one = all_text(&render_buffer(&twenty_one_app_at(100, 30), 100, 30));
+        assert!(twenty_one.contains("S STAND"));
+        assert!(!twenty_one.contains("SPACE jump"));
+
+        let mut jump = app_at(100, 30);
+        jump.start_game();
+        let text = all_text(&render_buffer(&jump, 100, 30));
+        assert!(text.contains("SPACE jump"));
+        assert!(!text.contains("S STAND"));
     }
 }

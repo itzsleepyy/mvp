@@ -8,8 +8,16 @@ use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 pub enum AppInput {
     /// ENTER — confirm selection / start game.
     Confirm,
-    /// SPACE or UP — jump.
+    /// SPACE — jump.
     Jump,
+    /// H — hit (Twenty One).
+    Hit,
+    /// S — stand (Twenty One).
+    Stand,
+    /// ↑ — navigate menus; jumps while playing.
+    Up,
+    /// ↓ — navigate menus.
+    Down,
     /// P — pause or resume.
     TogglePause,
     /// R — restart after a game over.
@@ -50,7 +58,11 @@ fn key_to_input(key: event::KeyEvent) -> Option<AppInput> {
     let press = key.kind == KeyEventKind::Press;
     match key.code {
         KeyCode::Enter => Some(AppInput::Confirm),
-        KeyCode::Char(' ') | KeyCode::Up => Some(AppInput::Jump),
+        KeyCode::Char(' ') => Some(AppInput::Jump),
+        KeyCode::Char('h') | KeyCode::Char('H') => press.then_some(AppInput::Hit),
+        KeyCode::Char('s') | KeyCode::Char('S') => press.then_some(AppInput::Stand),
+        KeyCode::Up => press.then_some(AppInput::Up),
+        KeyCode::Down => press.then_some(AppInput::Down),
         KeyCode::Char('p') | KeyCode::Char('P') => press.then_some(AppInput::TogglePause),
         KeyCode::Char('r') | KeyCode::Char('R') => press.then_some(AppInput::Restart),
         KeyCode::Esc => press.then_some(AppInput::Back),
@@ -86,14 +98,44 @@ mod tests {
     }
 
     #[test]
-    fn space_and_up_are_jump() {
+    fn space_is_jump() {
         assert_eq!(
             key_to_input(key(KeyCode::Char(' '), KeyModifiers::NONE)),
             Some(AppInput::Jump)
         );
+    }
+
+    #[test]
+    fn arrows_are_discrete_navigation() {
         assert_eq!(
             key_to_input(key(KeyCode::Up, KeyModifiers::NONE)),
-            Some(AppInput::Jump)
+            Some(AppInput::Up)
+        );
+        assert_eq!(
+            key_to_input(key(KeyCode::Down, KeyModifiers::NONE)),
+            Some(AppInput::Down)
+        );
+        assert_eq!(key_to_input(release(KeyCode::Up)), None);
+        assert_eq!(key_to_input(release(KeyCode::Down)), None);
+    }
+
+    #[test]
+    fn h_and_s_drive_twenty_one() {
+        assert_eq!(
+            key_to_input(key(KeyCode::Char('h'), KeyModifiers::NONE)),
+            Some(AppInput::Hit)
+        );
+        assert_eq!(
+            key_to_input(key(KeyCode::Char('H'), KeyModifiers::NONE)),
+            Some(AppInput::Hit)
+        );
+        assert_eq!(
+            key_to_input(key(KeyCode::Char('s'), KeyModifiers::NONE)),
+            Some(AppInput::Stand)
+        );
+        assert_eq!(
+            key_to_input(key(KeyCode::Char('S'), KeyModifiers::NONE)),
+            Some(AppInput::Stand)
         );
     }
 

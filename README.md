@@ -2,7 +2,7 @@
 
 > A competitive terminal arcade for the time between prompts. Play quick games while your coding agent works, compete on leaderboards, and jump straight back in when it needs you.
 
-**Status: early development.** WaitState currently ships its first playable game — *Stack Jump* — with local scoring and local coding-agent integrations for Claude Code, Codex, Gemini CLI and OpenCode. Everything else on the roadmap is still to come.
+**Status: early development.** WaitState currently ships two playable games — *Stack Jump* and *Twenty One* — with local scoring and local coding-agent integrations for Claude Code, Codex, Gemini CLI and OpenCode. Everything else on the roadmap is still to come.
 
 ## What is WaitState?
 
@@ -12,19 +12,50 @@ Coding agents (Claude Code, Codex, Gemini CLI, OpenCode) routinely work autonomo
 start agent → agent works → play WaitState → agent needs you → game pauses → you get back to work
 ```
 
-Games are designed for very short bursts — one button, instant restart, no tutorials.
+Games are designed for very short bursts — simple controls, instant restart, no tutorials.
 
 ## Current project status
 
 - [x] Terminal application foundation
-- [x] First playable game (Stack Jump)
-- [x] Local high-score persistence
+- [x] Two playable games (Stack Jump, Twenty One)
+- [x] Per-game local high-score persistence
 - [x] Claude Code integration
 - [x] Codex integration
 - [x] Gemini CLI integration
 - [x] OpenCode integration
 - [ ] GitHub authentication
 - [ ] Global leaderboards
+
+## Games
+
+Press `ENTER` on the main menu to choose a game. Selection is remembered between runs, and `ESC` steps back at any time.
+
+### Stack Jump
+
+An endless runner: hop over obstacles while the world scrolls past and the difficulty climbs. Score grows with survival time and with every obstacle passed. `SPACE` jumps; your best run survives into the next session.
+
+### Twenty One
+
+Blackjack against the dealer — you versus the house, no splitting or doubling down. You start with **1,000 chips** and bet **100** per round:
+
+- `H` hits, `S` stands.
+- The dealer stands on all 17s; naturals settle immediately.
+- A blackjack pays 3:2 (+150), a win pays even money (+100), a push returns the bet.
+- `ENTER` deals the next round.
+- The run ends when you can no longer afford the bet; your **peak** chip stack is the score that competes for the high-score board.
+
+## Controls
+
+| Key | Action |
+| --- | --- |
+| `ENTER` | Open the game menu / start the selected game / resume an agent-paused run |
+| `↑` / `↓` | Select a game (game menu) |
+| `SPACE` / `↑` | Jump (Stack Jump) |
+| `H` / `S` | Hit / stand (Twenty One) |
+| `P` | Pause / resume (manual) |
+| `R` | Restart after game over |
+| `ESC` | Back to menu |
+| `Q` / `CTRL+C` | Quit |
 
 ## Installation
 
@@ -35,17 +66,6 @@ git clone https://github.com/itzsleepyy/waitstate
 cd waitstate
 cargo run --release
 ```
-
-## Controls
-
-| Key | Action |
-| --- | --- |
-| `ENTER` | Start / play again / resume an agent-paused run |
-| `SPACE` / `↑` | Jump |
-| `P` | Pause / resume (manual) |
-| `R` | Restart after game over |
-| `ESC` | Back to menu |
-| `Q` / `CTRL+C` | Quit |
 
 ## Supported coding agents
 
@@ -191,10 +211,10 @@ src/
 │                status/uninstall, integrations overview/install/repair)
 ├── tui.rs       terminal init/restore (raw mode, alternate screen, panic hook)
 ├── event.rs     crossterm events → application inputs
-├── app.rs       application state machine (Menu / Playing / PausedManual /
-│                PausedAgent / GameOver), per-agent state and the aggregate
-│                attention model
-├── config.rs    platform-aware local high-score storage
+├── app.rs       application state machine (Menu / GameMenu / Playing /
+│                PausedManual / PausedAgent / GameOver), game selection,
+│                per-agent state and the aggregate attention model
+├── config.rs    platform-aware per-game high-score storage
 ├── ui.rs        Ratatui rendering (menu, HUD, overlays, resize handling)
 ├── agent/       generic agent lifecycle events, status and adapters
 │   ├── event.rs       AgentEvent (started/working/needs-input/completed/stopped)
@@ -211,18 +231,22 @@ src/
 │   ├── server.rs    loopback listener thread → channel → main loop
 │   └── client.rs    one-shot event sender (used by hook bridges)
 └── game/        pure game logic, no terminal types
-    ├── mod.rs       StackJump game and the headless update loop
+    ├── mod.rs       GameKind registry, the ActiveGame wrapper over live
+    │                games, and the shared GameInput vocabulary
     ├── state.rs     run state
-    ├── player.rs    jumping physics
-    ├── obstacle.rs  obstacle kinds
-    ├── world.rs     obstacle spawning, speed/difficulty scaling
-    ├── collision.rs AABB collision
-    └── scoring.rs   survival scoring and formatting
+    ├── player.rs    jumping physics (Stack Jump)
+    ├── obstacle.rs  obstacle kinds (Stack Jump)
+    ├── world.rs     obstacle spawning, speed/difficulty scaling (Stack Jump)
+    ├── collision.rs AABB collision (Stack Jump)
+    ├── scoring.rs   survival scoring and formatting (Stack Jump)
+    └── twenty_one.rs  blackjack: cards, hands, dealer rules, chips (21)
 ```
 
 Key decisions:
 
 - **Simulation is delta-time based and clamped** (`MAX_FRAME_TIME`), so gameplay never depends on frame rate.
+- **The app never talks to a specific game.** `ActiveGame` exposes a small shared surface (`handle_input`, `update`, `is_game_over`, `score`, `set_viewport`) and the renderer branches per `GameKind` — adding a game means adding a module plus two render/match arms, not reworking the state machine.
+- **Turn-based games fit the same loop**: `update(dt)` is a no-op and input drives everything, so agent pauses freeze the table exactly like the physics.
 - **`App::tick(dt)` advances the game only while playing** on an adequate terminal — pause and terminal-size handling live in exactly one place.
 - **All state transitions are programmatic methods** (`pause()`, `start_game()`, `handle_agent_event(...)`, …). Keyboard input and agent lifecycle events drive the same state machine without knowing about each other.
 - **Agent events arrive on a channel and are applied on the main loop** — application state stays single-threaded, no locks.
@@ -237,8 +261,9 @@ Key decisions:
 
 ```text
 [x] Terminal application foundation
-[x] First playable game (Stack Jump)
-[x] Local scoring
+[x] Two playable games (Stack Jump, Twenty One)
+[x] Game selection menu
+[x] Local per-game scoring
 [x] Claude Code integration
 [x] Codex integration
 [x] Gemini CLI integration
