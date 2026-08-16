@@ -111,6 +111,14 @@ impl ClaudeConfig {
         }
         // Drop now-empty event arrays.
         hooks.retain(|_, groups| groups.as_array().is_some_and(|g| !g.is_empty()));
+        // Drop the whole "hooks" key when nothing remains, restoring the
+        // config to exactly its pre-install shape.
+        if hooks.is_empty() {
+            self.data
+                .as_object_mut()
+                .expect("config is an object")
+                .remove("hooks");
+        }
         removed
     }
 
@@ -488,10 +496,9 @@ mod tests {
         config.save().unwrap();
 
         let raw: Value = serde_json::from_str(&load_str(&path)).unwrap();
-        assert_eq!(
-            raw["hooks"].as_object().unwrap().len(),
-            0,
-            "empty event arrays must be removed"
+        assert!(
+            raw.get("hooks").is_none(),
+            "the hooks key must be removed entirely when empty"
         );
     }
 
