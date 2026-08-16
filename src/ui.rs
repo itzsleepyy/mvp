@@ -5,7 +5,8 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph, Widget};
 
-use crate::app::{App, AppState};
+use crate::agent::AgentStatus;
+use crate::app::{App, AppState, PauseReason};
 use crate::game::obstacle::ObstacleKind;
 use crate::game::scoring::format_score;
 use crate::game::{self, GameRenderState, StackJump};
@@ -29,7 +30,10 @@ pub fn render(frame: &mut Frame, app: &App) {
     }
     match app.state {
         AppState::Menu => render_menu(frame, app),
-        AppState::Playing | AppState::Paused | AppState::GameOver => render_game(frame, app),
+        AppState::Playing
+        | AppState::PausedManual
+        | AppState::PausedAgent(_)
+        | AppState::GameOver => render_game(frame, app),
     }
 }
 
@@ -65,6 +69,10 @@ fn render_menu(frame: &mut Frame, app: &App) {
     lines.push(Line::from(""));
     lines.push(Line::styled("ARCADE FOR THE AGENTIC ERA", dim));
     lines.push(Line::from(""));
+    if let Some(status_line) = agent_status_line(app) {
+        lines.push(status_line);
+        lines.push(Line::from(""));
+    }
     lines.push(Line::styled("[ ENTER ] PLAY", green));
     lines.push(Line::from(""));
     lines.push(Line::styled("Q — QUIT", dim));
@@ -121,7 +129,8 @@ fn render_game(frame: &mut Frame, app: &App) {
     frame.render_widget(block, area);
 
     match app.state {
-        AppState::Paused => render_paused(frame, area),
+        AppState::PausedManual => render_paused(frame, area, app),
+        AppState::PausedAgent(reason) => render_agent_paused(frame, area, app, reason, game),
         AppState::GameOver => render_game_over(frame, area, game, app),
         AppState::Playing | AppState::Menu => {}
     }
@@ -140,8 +149,57 @@ fn hud_paragraph(game: &StackJump, app: &App) -> Paragraph<'static> {
         format!("BEST {:06}", app.best_score().max(game.score())),
         Style::new().fg(Color::Yellow),
     );
-    let line = Line::from(vec![score, Span::raw("   "), speed, Span::raw("   "), best]);
+    let mut line = Line::from(vec![score, Span::raw("   "), speed, Span::raw("   "), best]);
+    if let Some(status) = agent_status_span(app) {
+        line.spans.insert(0, Span::raw("   "));
+        line.spans.insert(0, status);
+    }
     Paragraph::new(line)
+}
+
+/// The small `Claude Code • Working` indicator shown in the HUD, pause
+/// overlays and menu. Returns `None` while no agent has ever reported in.
+fn agent_status_span(app: &App) -> Option<Span<'static>> {
+    let agent = app.agent();
+    if agent.status == AgentStatus::Disconnected {
+        return None;
+    }
+    let dot = match agent.status {
+        AgentStatus::Working => "●".to_string(),
+        _ => "○".to_string(),
+    };
+    let style = match agent.status {
+        AgentStatus::Working => Style::new().fg(Color::Green),
+        AgentStatus::NeedsInput => Style::new().fg(Color::Yellow),
+        AgentStatus::Completed => Style::new().fg(Color::Cyan),
+        AgentStatus::Disconnected | AgentStatus::Idle | AgentStatus::Stopped => {
+            Style::new().fg(Color::DarkGray)
+        }
+    };
+    Some(Span::styled(
+        format!("{} {} {}", agent.agent.name(), dot, agent.status.label()),
+        style,
+    ))
+}
+
+/// A full sentence for the menu, e.g. "Claude is working". `None` while
+/// no agent has ever reported in.
+fn agent_status_line(app: &App) -> Option<Line<'static>> {
+    let agent = app.agent();
+    let text = match agent.status {
+        AgentStatus::Disconnected => return None,
+        AgentStatus::Idle => "Claude Code is idle",
+        AgentStatus::Working => "Claude is working",
+        AgentStatus::NeedsInput => "Claude needs your input",
+        AgentStatus::Completed => "Claude finished",
+        AgentStatus::Stopped => "Claude Code session ended",
+    };
+    let style = match agent.status {
+        AgentStatus::Working => Style::new().fg(Color::Green),
+        AgentStatus::NeedsInput => Style::new().fg(Color::Yellow),
+        _ => Style::new().fg(Color::DarkGray),
+    };
+    Some(Line::styled(text, style))
 }
 
 fn controls_paragraph() -> Paragraph<'static> {
@@ -153,12 +211,8 @@ fn controls_paragraph() -> Paragraph<'static> {
     Paragraph::new(line).alignment(Alignment::Center)
 }
 
-fn render_paused(frame: &mut Frame, area: Rect) {
-    let rect = centered_fixed(area, 40, 5);
-    frame.render_widget(Clear, rect);
-    let block = Block::bordered().border_style(Style::new().fg(Color::Yellow));
-    let inner = block.inner(rect);
-    let lines = vec![
+fn render_paused(frame: &mut Frame, area: Rect, app: &App) {
+    let mut lines = vec![
         Line::styled(
             "PAUSED",
             Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
@@ -166,6 +220,74 @@ fn render_paused(frame: &mut Frame, area: Rect) {
         Line::from(""),
         Line::styled("P resume    ESC menu", Style::new().fg(Color::DarkGray)),
     ];
+    if let Some(status) = agent_status_span(app) {
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![Span::raw("   "), status, Span::raw("   ")]));
+    }
+    let height = lines.len() as u16 + 2;
+    let rect = centered_fixed(area, 40, height);
+    frame.render_widget(Clear, rect);
+    let block = Block::bordered().border_style(Style::new().fg(Color::Yellow));
+    let inner = block.inner(rect);
+    frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center), inner);
+    frame.render_widget(block, rect);
+}
+
+/// The agent-pause overlay: visually distinct from manual pause so the
+/// developer instantly knows *why* the game stopped.
+fn render_agent_paused(
+    frame: &mut Frame,
+    area: Rect,
+    app: &App,
+    reason: PauseReason,
+    game: &StackJump,
+) {
+    let (title, detail, hint) = match reason {
+        PauseReason::NeedsInput => (
+            "CLAUDE NEEDS YOU",
+            "Stack Jump paused automatically",
+            "Return to Claude Code",
+        ),
+        PauseReason::Completed => (
+            "CLAUDE FINISHED",
+            "Your run has been preserved",
+            "Return to Claude Code",
+        ),
+        PauseReason::Stopped => (
+            "CLAUDE SESSION ENDED",
+            "Your run has been preserved",
+            "Restart Claude Code to resume",
+        ),
+    };
+    let mut lines = vec![
+        Line::styled(
+            title,
+            Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        ),
+        Line::from(""),
+        Line::styled(detail, Style::new().fg(Color::DarkGray)),
+        Line::from(""),
+        Line::styled(
+            format!("Score {}", format_score(game.score())),
+            Style::new().fg(Color::White),
+        ),
+        Line::from(""),
+        Line::styled(hint, Style::new().fg(Color::DarkGray)),
+    ];
+    if let Some(status) = agent_status_span(app) {
+        lines.push(Line::from(vec![Span::raw("   "), status, Span::raw("   ")]));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::styled(
+        "[ENTER] resume run    [ESC] menu",
+        Style::new().fg(Color::Green),
+    ));
+
+    let height = lines.len() as u16 + 2;
+    let rect = centered_fixed(area, 44, height);
+    frame.render_widget(Clear, rect);
+    let block = Block::bordered().border_style(Style::new().fg(Color::Cyan));
+    let inner = block.inner(rect);
     frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center), inner);
     frame.render_widget(block, rect);
 }
@@ -195,6 +317,9 @@ fn render_game_over(frame: &mut Frame, area: Rect, game: &StackJump, app: &App) 
             "NEW BEST!",
             Style::new().fg(Color::Green).add_modifier(Modifier::BOLD),
         ));
+    }
+    if let Some(status) = agent_status_span(app) {
+        lines.push(Line::from(vec![Span::raw("   "), status, Span::raw("   ")]));
     }
     lines.push(Line::from(""));
     lines.push(Line::styled(
@@ -429,6 +554,85 @@ mod tests {
         app.pause();
         let text = all_text(&render_buffer(&app, 100, 30));
         assert!(text.contains("PAUSED"));
+    }
+
+    #[test]
+    fn agent_pause_render_is_distinct_from_manual_pause() {
+        let mut app = app_at(100, 30);
+        app.start_game();
+        app.handle_agent_event(crate::agent::AgentEvent::NeedsInput);
+        let text = all_text(&render_buffer(&app, 100, 30));
+        assert!(text.contains("CLAUDE NEEDS YOU"));
+        assert!(text.contains("paused automatically"));
+        assert!(text.contains("Return to Claude Code"));
+        assert!(text.contains("resume run"));
+        assert!(!text.contains("PAUSED"));
+    }
+
+    #[test]
+    fn completed_pause_render_shows_finished() {
+        let mut app = app_at(100, 30);
+        app.start_game();
+        app.handle_agent_event(crate::agent::AgentEvent::Completed);
+        let text = all_text(&render_buffer(&app, 100, 30));
+        assert!(text.contains("CLAUDE FINISHED"));
+        assert!(text.contains("Your run has been preserved"));
+    }
+
+    #[test]
+    fn session_end_pause_render_shows_ended() {
+        let mut app = app_at(100, 30);
+        app.start_game();
+        app.handle_agent_event(crate::agent::AgentEvent::Stopped);
+        let text = all_text(&render_buffer(&app, 100, 30));
+        assert!(text.contains("CLAUDE SESSION ENDED"));
+    }
+
+    #[test]
+    fn hud_shows_agent_indicator_when_agent_reported_in() {
+        let mut app = app_at(100, 30);
+        app.start_game();
+        app.handle_agent_event(crate::agent::AgentEvent::Working);
+        let text = all_text(&render_buffer(&app, 100, 30));
+        assert!(text.contains("Claude Code"));
+        assert!(text.contains("Working"));
+    }
+
+    #[test]
+    fn hud_has_no_agent_indicator_when_disconnected() {
+        let mut app = app_at(100, 30);
+        app.start_game();
+        let text = all_text(&render_buffer(&app, 100, 30));
+        assert!(!text.contains("Claude"));
+    }
+
+    #[test]
+    fn menu_shows_claude_working_hint() {
+        let mut app = app_at(100, 30);
+        app.handle_agent_event(crate::agent::AgentEvent::Working);
+        let text = all_text(&render_buffer(&app, 100, 30));
+        assert!(text.contains("Claude is working"));
+        assert!(text.contains("PLAY"));
+    }
+
+    #[test]
+    fn menu_has_no_agent_line_when_disconnected() {
+        let app = app_at(100, 30);
+        let text = all_text(&render_buffer(&app, 100, 30));
+        assert!(!text.contains("Claude"));
+    }
+
+    #[test]
+    fn game_over_panel_shows_agent_line() {
+        let mut app = app_at(100, 30);
+        app.start_game();
+        app.spawn_test_obstacle();
+        app.tick(std::time::Duration::from_millis(16));
+        assert_eq!(app.state, AppState::GameOver);
+        app.handle_agent_event(crate::agent::AgentEvent::Completed);
+        let text = all_text(&render_buffer(&app, 100, 30));
+        assert!(text.contains("GAME OVER"));
+        assert!(text.contains("Finished"));
     }
 
     #[test]
