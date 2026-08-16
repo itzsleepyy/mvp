@@ -20,7 +20,9 @@
 //! prints `{}` (valid, decision-free JSON) and exits 0. Codex therefore
 //! treats every hook as observational: `PermissionRequest` never decides
 //! (the normal approval flow continues) and `Stop` never asks to continue
-//! a turn. Hooks are `async` so they can never block Codex.
+//! a turn. Hooks are synchronous with a 2-second timeout: verified against
+//! real Codex, `async` hooks are cancelled before they run in `codex exec`
+//! sessions, while the sync bridge is one bounded local TCP connect.
 //!
 //! Known limitations:
 //! - Codex requires non-managed hooks to be reviewed and trusted via

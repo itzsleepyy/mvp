@@ -94,15 +94,17 @@ impl CodexConfig {
 
 /// The Codex handler: a shell command string calling the `hook` bridge,
 /// which sends the event and prints `{}` (valid, decision-free JSON).
-/// `async` keeps the hook from ever blocking Codex; `timeout` bounds a
-/// hung process.
+///
+/// Deliberately synchronous: Codex `async` hooks were verified not to run
+/// in `codex exec` sessions (the session ends before background hooks get
+/// to run). The bridge is one bounded local TCP connect, so the agent loop
+/// is never held up noticeably.
 fn codex_handler(binary: &str, event: AgentEvent) -> Value {
     let command = format!("{} hook codex {}", shell_quote(binary), event.as_str());
     json!({
         "type": "command",
         "command": command,
         "timeout": 2,
-        "async": true,
     })
 }
 
@@ -194,8 +196,10 @@ mod tests {
             handler["command"],
             "'/opt/waitstate' hook codex needs-input"
         );
-        assert_eq!(handler["async"], true);
         assert_eq!(handler["timeout"], 2);
+        // Verified against real Codex: async hooks never run in exec
+        // sessions, so the handler must stay synchronous.
+        assert!(handler.get("async").is_none());
         // Stop expects JSON on stdout when it exits 0: the bridge prints {}.
         let stop = &hooks["Stop"][0]["hooks"][0];
         assert_eq!(stop["command"], "'/opt/waitstate' hook codex completed");
@@ -270,6 +274,41 @@ mod tests {
         );
         let session_start = raw["hooks"]["SessionStart"].as_array().unwrap();
         assert_eq!(session_start[0]["hooks"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn install_updates_handlers_whose_shape_changed() {
+        // Regression: the up-to-date check must compare the whole handler,
+        // so a hook installed by an older WaitState (e.g. with async) is
+        // upgraded, not silently kept.
+        let path = temp_config("shape", "");
+        let mut config = CodexConfig::load(&path).unwrap();
+        config.install_hooks(Path::new(BINARY_A));
+        config.save().unwrap();
+
+        let mut raw: Value = serde_json::from_str(&load_str(&path)).unwrap();
+        let handlers = raw["hooks"]["SessionStart"][0]["hooks"]
+            .as_array_mut()
+            .unwrap();
+        for handler in handlers {
+            handler["async"] = Value::Bool(true); // old WaitState shape
+        }
+        std::fs::write(&path, serde_json::to_string_pretty(&raw).unwrap()).unwrap();
+
+        let mut reloaded = CodexConfig::load(&path).unwrap();
+        assert_eq!(
+            reloaded.install_hooks(Path::new(BINARY_A)),
+            1,
+            "only the reshaped event must be rewritten"
+        );
+        reloaded.save().unwrap();
+
+        let raw: Value = serde_json::from_str(&load_str(&path)).unwrap();
+        let handler = &raw["hooks"]["SessionStart"][0]["hooks"][0];
+        assert!(
+            handler.get("async").is_none(),
+            "stale async shape must be replaced"
+        );
     }
 
     #[test]

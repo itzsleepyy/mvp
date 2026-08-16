@@ -222,15 +222,11 @@ impl HooksJson {
     ) -> bool {
         if let Some(handler) = self.find_handler_mut(spec.event, spec.agent_event, matches) {
             let fresh = build(binary, spec.agent_event);
-            if handler.get("command").and_then(Value::as_str)
-                == fresh.get("command").and_then(Value::as_str)
-                && handler.get("args").and_then(Value::as_array)
-                    == fresh.get("args").and_then(Value::as_array)
-            {
+            if *handler == fresh {
                 return false; // already installed and up to date
             }
             *handler = fresh;
-            return true; // stale binary path updated
+            return true; // stale handler (moved binary, changed shape) updated
         }
 
         let handler = build(binary, spec.agent_event);
