@@ -15,7 +15,7 @@ use std::time::Instant;
 use clap::Parser;
 
 use crate::agent::status::{AgentDisplay, AgentKind};
-use crate::cli::{AutoPlayValue, CodexCommand, Command, IntegrationsCommand, ProviderCommand};
+use crate::cli::{Command, IntegrationsCommand, ProviderCommand};
 
 fn main() -> Result<(), Box<dyn Error>> {
     let cli = cli::Cli::parse();
@@ -54,7 +54,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             Ok(())
         }
         Some(Command::Claude { command }) => run_provider(AgentKind::ClaudeCode, command),
-        Some(Command::Codex { command }) => run_codex(command),
+        Some(Command::Codex { command }) => run_provider(AgentKind::Codex, command),
         Some(Command::Gemini { command }) => run_provider(AgentKind::GeminiCli, command),
         Some(Command::Opencode { command }) => run_provider(AgentKind::OpenCode, command),
         Some(Command::Integrations { command }) => match command {
@@ -77,13 +77,19 @@ fn main() -> Result<(), Box<dyn Error>> {
 /// Dispatches one provider subcommand. Each provider handles its own
 /// config format; failures stay local to that provider.
 fn run_provider(kind: AgentKind, command: ProviderCommand) -> Result<(), Box<dyn Error>> {
-    use crate::agent::{claude, gemini, opencode};
+    use crate::agent::{claude, codex, gemini, opencode};
     let to_err = |e: String| -> Box<dyn Error> { std::io::Error::other(e).into() };
     match (kind, command) {
         (AgentKind::ClaudeCode, ProviderCommand::Install) => claude::install().map_err(to_err),
         (AgentKind::ClaudeCode, ProviderCommand::Uninstall) => claude::uninstall().map_err(to_err),
         (AgentKind::ClaudeCode, ProviderCommand::Status) => {
             claude::status();
+            Ok(())
+        }
+        (AgentKind::Codex, ProviderCommand::Install) => codex::install().map_err(to_err),
+        (AgentKind::Codex, ProviderCommand::Uninstall) => codex::uninstall().map_err(to_err),
+        (AgentKind::Codex, ProviderCommand::Status) => {
+            codex::status();
             Ok(())
         }
         (AgentKind::GeminiCli, ProviderCommand::Install) => gemini::install().map_err(to_err),
@@ -98,37 +104,6 @@ fn run_provider(kind: AgentKind, command: ProviderCommand) -> Result<(), Box<dyn
             opencode::status();
             Ok(())
         }
-        (AgentKind::Codex, _) => unreachable!("Codex has its own command enum"),
-    }
-}
-
-fn run_codex(command: CodexCommand) -> Result<(), Box<dyn Error>> {
-    let to_err = |e: String| -> Box<dyn Error> { std::io::Error::other(e).into() };
-    match command {
-        CodexCommand::Install => agent::codex::install().map_err(to_err),
-        CodexCommand::Uninstall => agent::codex::uninstall().map_err(to_err),
-        CodexCommand::Status => {
-            agent::codex::status();
-            Ok(())
-        }
-        CodexCommand::AutoPlay { value } => {
-            let mut settings = config::SettingsStore::discover();
-            match value {
-                AutoPlayValue::On => settings.set_codex_auto_play(true),
-                AutoPlayValue::Off => settings.set_codex_auto_play(false),
-                AutoPlayValue::Status => {}
-            }
-            println!(
-                "Codex auto-play: {}",
-                if settings.codex_auto_play() {
-                    "on"
-                } else {
-                    "off"
-                }
-            );
-            Ok(())
-        }
-        CodexCommand::Run { args } => agent::codex::runner::run(&args),
     }
 }
 

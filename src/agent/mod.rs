@@ -5,9 +5,8 @@
 //! nothing about individual agents — provider-specific details stay inside
 //! each adapter module (`claude`, `codex`, `gemini`, `opencode`).
 //!
-//! Privacy principle: adapters receive lifecycle events only. Managed Codex
-//! mode relays opaque terminal bytes in memory but never interprets, logs,
-//! persists or transmits them.
+//! Privacy principle: WaitState receives lifecycle events only. It never
+//! sees prompts, tool inputs, source code or agent output.
 
 pub mod claude;
 pub mod codex;

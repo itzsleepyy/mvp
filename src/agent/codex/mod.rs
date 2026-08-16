@@ -39,7 +39,6 @@
 //! unchanged.
 
 mod config;
-pub mod runner;
 
 use std::path::Path;
 
@@ -113,7 +112,6 @@ fn install_with_binary(binary: &Path) -> Result<(), String> {
         println!("WaitState hooks are already installed and up to date.");
         println!("Config: {}", path.display());
         println!("Remember: review and trust the hooks in Codex with /hooks.");
-        println!("Run Codex with the game: waitstate codex run");
         return Ok(());
     }
     config.save()?;
@@ -124,7 +122,6 @@ fn install_with_binary(binary: &Path) -> Result<(), String> {
     println!("Config: {}", path.display());
     println!("A backup of the previous settings was saved next to it.");
     println!("Remember: review and trust the hooks in Codex with /hooks.");
-    println!("Run Codex with the game: waitstate codex run");
     Ok(())
 }
 
@@ -155,11 +152,7 @@ pub fn status() {
 pub fn status_state() -> ProviderStatus {
     match CodexConfig::load(&config_path()) {
         Ok(config) => {
-            let binary = match current_binary() {
-                Ok(binary) => binary,
-                Err(err) => return ProviderStatus::Broken(err),
-            };
-            let (installed, total) = config.current_hook_status(&binary);
+            let (installed, total) = config.hook_status();
             match (installed, total) {
                 (0, _) => ProviderStatus::NotInstalled,
                 (i, t) if i == t => ProviderStatus::Current,
@@ -207,14 +200,12 @@ fn print_provider_status(hooks: &ProviderStatus) {
     );
     if waitstate_running {
         println!("IPC:        connected");
-    } else if matches!(hooks, ProviderStatus::Current) {
-        println!("Launch:     waitstate codex run (same terminal)");
     }
 
     println!();
     let overall = match (hooks, waitstate_running) {
         (ProviderStatus::Current, true) => "ready",
-        (ProviderStatus::Current, false) => "hooks configured; game not running",
+        (ProviderStatus::Current, false) => "hooks configured",
         (ProviderStatus::Outdated(_), _) => "outdated",
         (ProviderStatus::Broken(_), _) => "broken",
         (ProviderStatus::NotInstalled, _) => "not integrated",

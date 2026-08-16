@@ -14,7 +14,6 @@
 //!                                        output; hidden from help)
 //! waitstate claude install|uninstall|status
 //! waitstate codex install|uninstall|status
-//! waitstate codex run -- [CODEX_ARGS...]  run Codex and the game in one terminal
 //! waitstate gemini install|uninstall|status
 //! waitstate opencode install|uninstall|status
 //! waitstate integrations                 show all integrations at once
@@ -23,9 +22,7 @@
 //! waitstate integrations repair          fix missing/outdated pieces
 //! ```
 
-use std::ffi::OsString;
-
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Parser, Subcommand};
 
 use crate::agent::event::AgentEvent;
 use crate::agent::status::{AgentDisplay, AgentKind};
@@ -82,7 +79,7 @@ pub enum Command {
     /// Manage the Codex integration
     Codex {
         #[command(subcommand)]
-        command: CodexCommand,
+        command: ProviderCommand,
     },
     /// Manage the Gemini CLI integration
     Gemini {
@@ -108,34 +105,6 @@ pub enum ProviderCommand {
     /// Remove only WaitState-owned hooks/plugin files
     Uninstall,
     /// Show integration status
-    Status,
-}
-
-#[derive(Debug, Subcommand)]
-pub enum CodexCommand {
-    /// Merge WaitState hooks into the Codex configuration (idempotent)
-    Install,
-    /// Remove only WaitState-owned Codex hooks
-    Uninstall,
-    /// Show Codex integration status
-    Status,
-    /// Read or change automatic game display for managed Codex sessions
-    AutoPlay {
-        #[arg(value_enum, default_value_t = AutoPlayValue::Status)]
-        value: AutoPlayValue,
-    },
-    /// Run Codex and automatically show the game while the agent works
-    Run {
-        /// Arguments forwarded verbatim to Codex after `--no-alt-screen`
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<OsString>,
-    },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum AutoPlayValue {
-    On,
-    Off,
     Status,
 }
 
@@ -325,7 +294,9 @@ mod tests {
                     ),
                     Some(Command::Codex { command }) => matches!(
                         command,
-                        CodexCommand::Install | CodexCommand::Uninstall | CodexCommand::Status
+                        ProviderCommand::Install
+                            | ProviderCommand::Uninstall
+                            | ProviderCommand::Status
                     ),
                     Some(Command::Gemini { command }) => matches!(
                         command,
@@ -375,45 +346,5 @@ mod tests {
                 command: Some(IntegrationsCommand::Repair)
             })
         ));
-    }
-
-    #[test]
-    fn codex_run_forwards_trailing_arguments() {
-        let cli = parse(&[
-            "waitstate",
-            "codex",
-            "run",
-            "--",
-            "--model",
-            "gpt-5.6-sol",
-            "resume",
-            "--last",
-        ]);
-        match cli.command {
-            Some(Command::Codex {
-                command: CodexCommand::Run { args },
-            }) => {
-                let values: Vec<_> = args.iter().map(|arg| arg.to_string_lossy()).collect();
-                assert_eq!(values, ["--model", "gpt-5.6-sol", "resume", "--last"]);
-            }
-            other => panic!("unexpected command: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn codex_auto_play_parses_all_values() {
-        for (name, expected) in [
-            ("on", AutoPlayValue::On),
-            ("off", AutoPlayValue::Off),
-            ("status", AutoPlayValue::Status),
-        ] {
-            let cli = parse(&["waitstate", "codex", "auto-play", name]);
-            assert!(matches!(
-                cli.command,
-                Some(Command::Codex {
-                    command: CodexCommand::AutoPlay { value }
-                }) if value == expected
-            ));
-        }
     }
 }
