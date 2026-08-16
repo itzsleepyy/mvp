@@ -205,7 +205,7 @@ mod tests {
 
     #[test]
     fn command_in_dirs_finds_an_executable() {
-        let dir = std::env::temp_dir().join(format!("waitstate_path_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("waitstate_path_{}_exec", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("codex");
@@ -231,7 +231,8 @@ mod tests {
 
     #[test]
     fn command_in_dirs_rejects_non_executable_files() {
-        let dir = std::env::temp_dir().join(format!("waitstate_path_{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("waitstate_path_{}_noexec", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("gemini");
