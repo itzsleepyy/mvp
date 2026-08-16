@@ -17,11 +17,19 @@ use crate::agent::status::AgentKind;
 use crate::ipc::protocol::{AgentMessage, MAX_MESSAGE_BYTES};
 
 /// Contents of the socket file clients read to reach the server.
+///
+/// `pid` records the owning process so a *stale* socket file is recognised
+/// even when the OS has since handed the port to an unrelated process
+/// (ephemeral port reuse). Without the liveness check, a fresh WaitState
+/// could probe a stale file, connect to some other listener, and wrongly
+/// decide another instance owns the socket — running without an IPC server.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SocketInfo {
     pub version: u8,
     pub port: u16,
     pub token: String,
+    #[serde(default)]
+    pub pid: u32,
 }
 
 /// A bound, listening IPC server. Dropping it removes the socket file and
@@ -54,6 +62,7 @@ impl IpcServer {
             version: 1,
             port,
             token,
+            pid: std::process::id(),
         };
         write_socket_file(&socket_path, &info)?;
 
@@ -98,10 +107,35 @@ impl Drop for IpcServer {
 }
 
 /// True when a WaitState instance can be reached at the given socket info.
-/// A bounded probe: any failure means "not running".
+/// A bounded probe: any failure means "not running". The recorded owner PID
+/// must be alive first, so a stale file whose port was reused by some
+/// unrelated process never counts as an owner.
 fn server_answers(info: &SocketInfo) -> bool {
+    if !owner_pid_alive(info.pid) {
+        return false;
+    }
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], info.port));
     TcpStream::connect_timeout(&addr, Duration::from_millis(500)).is_ok()
+}
+
+/// True when a process with `pid` exists. `pid == 0` means "unknown"
+/// (socket files written by older versions) and is treated as alive so the
+/// port probe decides.
+fn owner_pid_alive(pid: u32) -> bool {
+    if pid == 0 {
+        return true;
+    }
+    #[cfg(unix)]
+    {
+        // SAFETY: kill(pid, 0) only probes existence; it never sends a
+        // signal. pid 0 is excluded above (it would probe our own group).
+        unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        true
+    }
 }
 
 fn accept_loop(
@@ -365,10 +399,58 @@ mod tests {
             version: 1,
             port: 9,
             token: "dead".into(),
+            pid: std::process::id(),
         };
         write_socket_file(&path, &stale).unwrap();
         let server = IpcServer::start(path.clone()).unwrap();
         assert!(server.is_some(), "stale socket file must be reclaimed");
+    }
+
+    #[test]
+    fn stale_socket_file_is_reclaimed_even_when_the_port_answers() {
+        // Regression: after an unclean exit, the OS may hand the recorded
+        // port to an unrelated process. The dead owner PID must win over
+        // the port probe, otherwise WaitState silently runs without IPC.
+        let path = temp_socket_path("staleport");
+        let _ = std::fs::remove_file(&path);
+
+        let unrelated = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = unrelated.local_addr().unwrap().port();
+        let stale = SocketInfo {
+            version: 1,
+            port,
+            token: "dead".into(),
+            pid: 99_999_999, // certainly not our process
+        };
+        write_socket_file(&path, &stale).unwrap();
+
+        let server = IpcServer::start(path.clone()).unwrap();
+        assert!(
+            server.is_some(),
+            "a dead owner PID must reclaim the file despite the answering port"
+        );
+        drop(server);
+        drop(unrelated);
+    }
+
+    #[test]
+    fn live_owner_still_blocks_a_second_instance() {
+        let path = temp_socket_path("liveowner");
+        let _ = std::fs::remove_file(&path);
+        let first = IpcServer::start(path.clone()).unwrap().unwrap();
+        let second = IpcServer::start(path.clone()).unwrap();
+        assert!(second.is_none(), "a live owner must keep the socket");
+        drop(first);
+    }
+
+    #[test]
+    fn socket_files_record_the_owner_pid() {
+        let path = temp_socket_path("pidfile");
+        let _ = std::fs::remove_file(&path);
+        let server = IpcServer::start(path.clone()).unwrap().unwrap();
+        let info = read_socket_info(&path).unwrap();
+        assert_eq!(info.pid, std::process::id());
+        drop(server);
     }
 
     #[test]

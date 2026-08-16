@@ -1723,6 +1723,7 @@ dependencies = [
  "clap",
  "crossterm",
  "directories",
+ "libc",
  "rand 0.10.2",
  "ratatui",
  "serde",

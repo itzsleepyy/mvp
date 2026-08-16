@@ -48,6 +48,11 @@ pub struct App {
     /// Monotonic event counter; the agent with the highest `activity` value
     /// most recently emitted an event.
     activity_seq: u64,
+    /// The agents whose status caused the current [`AppState::PausedAgent`]
+    /// pause. Kept because the pause reason can outlive the agent status
+    /// (a completed agent that starts working again does not clear the
+    /// pause), and the overlay must still name the right agents.
+    pause_involved: Vec<AgentKind>,
     /// Which agent to display (`--agent codex`, `--agent auto`).
     display_preference: Option<AgentDisplay>,
     /// Whether an agent `Working` event may resume a run that the agent
@@ -69,6 +74,7 @@ impl App {
             should_quit: false,
             agents: HashMap::new(),
             activity_seq: 0,
+            pause_involved: Vec::new(),
             display_preference: None,
             agent_auto_resume: true,
         }
@@ -223,14 +229,17 @@ impl App {
             AppState::Playing | AppState::PausedAgent(_) => {
                 if needs {
                     self.state = AppState::PausedAgent(PauseReason::NeedsInput);
+                    self.pause_involved = self.agents_with_status(AgentStatus::NeedsInput);
                 } else if working {
                     if self.agent_auto_resume {
                         self.state = AppState::Playing;
                     }
                 } else if completed {
                     self.state = AppState::PausedAgent(PauseReason::Completed);
+                    self.pause_involved = self.agents_with_status(AgentStatus::Completed);
                 } else if stopped {
                     self.state = AppState::PausedAgent(PauseReason::Stopped);
+                    self.pause_involved = self.agents_with_status(AgentStatus::Stopped);
                 }
             }
             AppState::Menu | AppState::PausedManual | AppState::GameOver => {}
@@ -277,6 +286,14 @@ impl App {
             .collect();
         kinds.sort_unstable();
         kinds
+    }
+
+    /// The agents that caused the current agent pause. Unlike the live
+    /// statuses, this survives a completing agent starting to work again
+    /// (the pause itself is sticky, and the overlay keeps naming who
+    /// finished).
+    pub fn pause_involved(&self) -> &[AgentKind] {
+        &self.pause_involved
     }
 
     /// Which agent the UI should display. `Specific(k)` always yields `k`;
@@ -925,6 +942,9 @@ mod tests {
         assert_eq!(app.state, AppState::PausedAgent(PauseReason::Completed));
         app.handle_agent_event(X, AgentEvent::Working);
         assert_eq!(app.state, AppState::PausedAgent(PauseReason::Completed));
+        // The overlay keeps attributing the pause to the completing agents
+        // even though both are working again.
+        assert_eq!(app.pause_involved(), &[C, X]);
 
         app.handle_input(AppInput::Confirm);
         assert_eq!(app.state, AppState::Playing);

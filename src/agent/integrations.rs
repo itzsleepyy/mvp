@@ -133,10 +133,12 @@ pub fn run_install(all: bool) {
             );
             continue;
         }
+        println!("{}", provider.kind.name());
         match (provider.install)() {
             Ok(()) => {}
-            Err(err) => println!("{:<14} failed: {err}", provider.kind.name()),
+            Err(err) => println!("  failed: {err}"),
         }
+        println!();
     }
 }
 

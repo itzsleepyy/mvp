@@ -346,7 +346,14 @@ fn render_agent_paused(
             "Restart {agents} to resume",
         ),
     };
-    let involved = app.agents_with_status(status);
+    // The agents that caused the pause. Prefer the recorded attribution:
+    // the pause is sticky, so a completing agent may already be working
+    // again while the run is still paused.
+    let mut involved = app.pause_involved().to_vec();
+    if involved.is_empty() {
+        involved = app.agents_with_status(status);
+    }
+    let involved = involved;
 
     // Title: "CODEX NEEDS YOU" for one agent, "2 AGENTS NEED YOU" for many.
     let title = if involved.len() == 1 {
