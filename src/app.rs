@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use crate::agent::{AgentEvent, AgentKind, AgentState};
 use crate::config::HighScoreStore;
 use crate::event::AppInput;
 use crate::game::{GameInput, StackJump};
@@ -9,19 +10,30 @@ use crate::ui;
 pub const MIN_COLS: u16 = 60;
 pub const MIN_ROWS: u16 = 20;
 
-/// Top-level application states. `Playing`/`Paused`/`GameOver` are all
-/// sub-states of a live run; `Menu` is the idle screen.
+/// Why the game was paused by the agent. Manual pauses are tracked
+/// separately as [`AppState::PausedManual`] so agent events can never
+/// override them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PauseReason {
+    NeedsInput,
+    Completed,
+    Stopped,
+}
+
+/// Top-level application states. `Playing`/`PausedManual`/`PausedAgent`/
+/// `GameOver` are all sub-states of a live run; `Menu` is the idle screen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppState {
     Menu,
     Playing,
-    Paused,
+    PausedManual,
+    PausedAgent(PauseReason),
     GameOver,
 }
 
 /// The application: owns state transitions and the active game. All
 /// transitions are plain methods so they can be driven by keyboard input
-/// today and by agent events (pause on `AgentNeedsInput`, etc.) later.
+/// and by agent lifecycle events without either knowing about the other.
 pub struct App {
     pub state: AppState,
     game: Option<StackJump>,
@@ -29,6 +41,12 @@ pub struct App {
     terminal_size: Option<(u16, u16)>,
     new_record: bool,
     should_quit: bool,
+    agent: AgentState,
+    /// Whether an agent `Working` event may resume a run that the agent
+    /// paused. Turned off in the application layer, never in the adapter.
+    /// A run paused because the agent *completed* is never auto-resumed:
+    /// the developer decides when to continue that run.
+    agent_auto_resume: bool,
 }
 
 impl App {
@@ -40,6 +58,8 @@ impl App {
             terminal_size: None,
             new_record: false,
             should_quit: false,
+            agent: AgentState::default(),
+            agent_auto_resume: true,
         }
     }
 
@@ -50,7 +70,8 @@ impl App {
             AppInput::Quit => self.quit(),
             AppInput::Confirm => match self.state {
                 AppState::Menu | AppState::GameOver => self.start_game(),
-                AppState::Playing | AppState::Paused => {}
+                AppState::PausedAgent(_) => self.resume(),
+                AppState::Playing | AppState::PausedManual => {}
             },
             AppInput::Jump => {
                 if self.state == AppState::Playing
@@ -67,7 +88,10 @@ impl App {
             }
             AppInput::Back => match self.state {
                 AppState::Menu => {}
-                AppState::Playing | AppState::Paused | AppState::GameOver => self.back_to_menu(),
+                AppState::Playing
+                | AppState::PausedManual
+                | AppState::PausedAgent(_)
+                | AppState::GameOver => self.back_to_menu(),
             },
             AppInput::Resize(cols, rows) => self.set_terminal_size(cols, rows),
         }
@@ -82,22 +106,30 @@ impl App {
         self.state = AppState::Playing;
     }
 
+    /// Manual pause. Never entered by agent events.
     pub fn pause(&mut self) {
         if self.state == AppState::Playing {
-            self.state = AppState::Paused;
+            self.state = AppState::PausedManual;
         }
     }
 
+    /// Resumes a run paused manually or by the agent.
     pub fn resume(&mut self) {
-        if self.state == AppState::Paused {
-            self.state = AppState::Playing;
+        match self.state {
+            AppState::PausedManual | AppState::PausedAgent(_) => {
+                self.state = AppState::Playing;
+            }
+            AppState::Menu | AppState::Playing | AppState::GameOver => {}
         }
     }
 
     pub fn toggle_pause(&mut self) {
         match self.state {
             AppState::Playing => self.pause(),
-            AppState::Paused => self.resume(),
+            AppState::PausedManual => self.resume(),
+            // Pressing P while the agent paused the game hands control
+            // back to the developer as a manual pause.
+            AppState::PausedAgent(_) => self.state = AppState::PausedManual,
             AppState::Menu | AppState::GameOver => {}
         }
     }
@@ -113,6 +145,65 @@ impl App {
 
     pub fn should_quit(&self) -> bool {
         self.should_quit
+    }
+
+    // ---- agent events -----------------------------------------------------
+
+    /// Applies one agent lifecycle event. Runs on the main loop only, so
+    /// application state stays single-threaded. Defensive by design:
+    /// duplicates are idempotent and unexpected orderings never panic —
+    /// they at most update the agent status.
+    pub fn handle_agent_event(&mut self, event: AgentEvent) {
+        let before = self.state;
+        self.agent.apply(event);
+        match event {
+            AgentEvent::Started => {}
+            AgentEvent::Working => {
+                if self.agent_auto_resume
+                    && let AppState::PausedAgent(reason) = self.state
+                    && reason != PauseReason::Completed
+                {
+                    self.state = AppState::Playing;
+                }
+            }
+            AgentEvent::NeedsInput => self.set_agent_pause(PauseReason::NeedsInput),
+            AgentEvent::Completed => self.set_agent_pause(PauseReason::Completed),
+            AgentEvent::Stopped => self.set_agent_pause(PauseReason::Stopped),
+        }
+        if before != self.state {
+            crate::debug_log!("agent event {event}: {before:?} → {:?}", self.state);
+        } else {
+            crate::debug_log!("agent event {event}: state unchanged ({:?})", self.state);
+        }
+    }
+
+    /// Enters the agent-paused state, or replaces the pause reason when
+    /// already paused by the agent. Manual pauses are never touched.
+    fn set_agent_pause(&mut self, reason: PauseReason) {
+        match self.state {
+            AppState::Playing | AppState::PausedAgent(_) => {
+                self.state = AppState::PausedAgent(reason);
+            }
+            AppState::Menu | AppState::PausedManual | AppState::GameOver => {}
+        }
+    }
+
+    /// The connected agent's current status (or disconnected).
+    pub fn agent(&self) -> &AgentState {
+        &self.agent
+    }
+
+    /// Announces which agent to display before any event has arrived
+    /// (`--agent claude`). The indicator still shows the live status.
+    pub fn set_agent_kind(&mut self, kind: AgentKind) {
+        self.agent.agent = kind;
+        self.agent.status = crate::agent::AgentStatus::Idle;
+    }
+
+    /// Controls whether agent `Working` events may resume an agent-paused
+    /// run (`--no-auto-resume` disables it).
+    pub fn set_agent_auto_resume(&mut self, enabled: bool) {
+        self.agent_auto_resume = enabled;
     }
 
     // ---- simulation ------------------------------------------------------
@@ -197,6 +288,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::AgentStatus;
     use crate::game::obstacle::{Obstacle, ObstacleKind};
 
     fn temp_store(name: &str) -> HighScoreStore {
@@ -233,6 +325,7 @@ mod tests {
         assert_eq!(app.state, AppState::Menu);
         assert!(app.game().is_none());
         assert!(!app.should_quit());
+        assert_eq!(app.agent().status, AgentStatus::Disconnected);
     }
 
     #[test]
@@ -258,7 +351,7 @@ mod tests {
         assert!(after_first > 0);
 
         app.pause();
-        assert_eq!(app.state, AppState::Paused);
+        assert_eq!(app.state, AppState::PausedManual);
         app.tick(Duration::from_secs(1));
         assert_eq!(app.game().unwrap().score(), after_first);
 
@@ -272,7 +365,7 @@ mod tests {
     fn pause_input_toggles_state() {
         let mut app = playing_app();
         app.handle_input(AppInput::TogglePause);
-        assert_eq!(app.state, AppState::Paused);
+        assert_eq!(app.state, AppState::PausedManual);
         app.handle_input(AppInput::TogglePause);
         assert_eq!(app.state, AppState::Playing);
     }
@@ -345,6 +438,11 @@ mod tests {
         paused.handle_input(AppInput::Back);
         assert_eq!(paused.state, AppState::Menu);
 
+        let mut agent_paused = playing_app();
+        agent_paused.handle_agent_event(AgentEvent::NeedsInput);
+        agent_paused.handle_input(AppInput::Back);
+        assert_eq!(agent_paused.state, AppState::Menu);
+
         let mut over = playing_app();
         collide(&mut over);
         over.tick(Duration::from_millis(16));
@@ -410,5 +508,221 @@ mod tests {
 
         let reloaded = app_with_size(HighScoreStore::load(&path), 100, 30);
         assert_eq!(reloaded.best_score(), best);
+    }
+
+    // ---- agent lifecycle transitions --------------------------------------
+
+    #[test]
+    fn needs_input_pauses_a_playing_game_for_the_agent() {
+        let mut app = playing_app();
+        app.tick(Duration::from_secs(1));
+        app.handle_agent_event(AgentEvent::NeedsInput);
+        assert_eq!(app.state, AppState::PausedAgent(PauseReason::NeedsInput));
+        assert_eq!(app.agent().status, AgentStatus::NeedsInput);
+    }
+
+    #[test]
+    fn working_resumes_an_agent_paused_game() {
+        let mut app = playing_app();
+        app.handle_agent_event(AgentEvent::NeedsInput);
+        assert_eq!(app.state, AppState::PausedAgent(PauseReason::NeedsInput));
+        app.handle_agent_event(AgentEvent::Working);
+        assert_eq!(app.state, AppState::Playing);
+    }
+
+    #[test]
+    fn manual_pause_is_never_overridden_by_agent_events() {
+        let mut app = playing_app();
+        app.pause();
+        app.handle_agent_event(AgentEvent::Working);
+        assert_eq!(app.state, AppState::PausedManual);
+        app.handle_agent_event(AgentEvent::NeedsInput);
+        assert_eq!(app.state, AppState::PausedManual);
+        app.handle_agent_event(AgentEvent::Completed);
+        assert_eq!(app.state, AppState::PausedManual);
+    }
+
+    #[test]
+    fn game_over_is_not_disturbed_by_agent_events() {
+        let mut app = playing_app();
+        collide(&mut app);
+        app.tick(Duration::from_millis(16));
+        assert_eq!(app.state, AppState::GameOver);
+        app.handle_agent_event(AgentEvent::Working);
+        assert_eq!(app.state, AppState::GameOver);
+        app.handle_agent_event(AgentEvent::NeedsInput);
+        assert_eq!(app.state, AppState::GameOver);
+    }
+
+    #[test]
+    fn menu_ignores_agent_events_without_crashing() {
+        let mut app = app_with_size(temp_store("menuagent.json"), 100, 30);
+        app.handle_agent_event(AgentEvent::NeedsInput);
+        assert_eq!(app.state, AppState::Menu);
+        app.handle_agent_event(AgentEvent::Working);
+        assert_eq!(app.state, AppState::Menu);
+        app.handle_agent_event(AgentEvent::Completed);
+        assert_eq!(app.state, AppState::Menu);
+        app.handle_agent_event(AgentEvent::Stopped);
+        assert_eq!(app.state, AppState::Menu);
+    }
+
+    #[test]
+    fn duplicate_events_are_idempotent() {
+        let mut app = playing_app();
+        app.handle_agent_event(AgentEvent::Working);
+        app.handle_agent_event(AgentEvent::Working);
+        assert_eq!(app.state, AppState::Playing);
+
+        app.handle_agent_event(AgentEvent::NeedsInput);
+        app.handle_agent_event(AgentEvent::NeedsInput);
+        assert_eq!(app.state, AppState::PausedAgent(PauseReason::NeedsInput));
+
+        app.handle_agent_event(AgentEvent::Working);
+        app.handle_agent_event(AgentEvent::Working);
+        assert_eq!(app.state, AppState::Playing);
+    }
+
+    #[test]
+    fn completion_pauses_the_run_and_requires_manual_resume() {
+        let mut app = playing_app();
+        app.tick(Duration::from_secs(1));
+        app.handle_agent_event(AgentEvent::Completed);
+        assert_eq!(app.state, AppState::PausedAgent(PauseReason::Completed));
+
+        // Claude working again does not silently continue a finished run.
+        app.handle_agent_event(AgentEvent::Working);
+        assert_eq!(app.state, AppState::PausedAgent(PauseReason::Completed));
+
+        // The developer decides when to continue it.
+        app.handle_input(AppInput::Confirm);
+        assert_eq!(app.state, AppState::Playing);
+    }
+
+    #[test]
+    fn session_end_pauses_and_working_resumes() {
+        let mut app = playing_app();
+        app.handle_agent_event(AgentEvent::Stopped);
+        assert_eq!(app.state, AppState::PausedAgent(PauseReason::Stopped));
+        app.handle_agent_event(AgentEvent::Working);
+        assert_eq!(app.state, AppState::Playing);
+    }
+
+    #[test]
+    fn pause_input_takes_control_from_agent_pause() {
+        let mut app = playing_app();
+        app.handle_agent_event(AgentEvent::NeedsInput);
+        assert_eq!(app.state, AppState::PausedAgent(PauseReason::NeedsInput));
+        app.handle_input(AppInput::TogglePause);
+        assert_eq!(app.state, AppState::PausedManual);
+        app.handle_input(AppInput::TogglePause);
+        assert_eq!(app.state, AppState::Playing);
+    }
+
+    #[test]
+    fn later_agent_status_replaces_the_pause_reason() {
+        let mut app = playing_app();
+        app.handle_agent_event(AgentEvent::NeedsInput);
+        app.handle_agent_event(AgentEvent::Completed);
+        assert_eq!(app.state, AppState::PausedAgent(PauseReason::Completed));
+        app.handle_agent_event(AgentEvent::NeedsInput);
+        assert_eq!(app.state, AppState::PausedAgent(PauseReason::NeedsInput));
+    }
+
+    #[test]
+    fn agent_pause_preserves_the_whole_run() {
+        use crate::game::obstacle::Obstacle;
+        use crate::game::player::Player;
+
+        fn snapshot(app: &App) -> (u64, f64, Player, Vec<Obstacle>, f64) {
+            let game = app.game().unwrap();
+            (
+                game.score(),
+                game.elapsed(),
+                *game.render_state().player,
+                game.world.obstacles.clone(),
+                game.speed_multiplier(),
+            )
+        }
+
+        let mut app = playing_app();
+        app.tick(Duration::from_secs(2));
+        let before = snapshot(&app);
+
+        app.handle_agent_event(AgentEvent::NeedsInput);
+        app.tick(Duration::from_secs(2));
+        assert_eq!(snapshot(&app), before, "agent pause must freeze the run");
+
+        app.handle_agent_event(AgentEvent::Working);
+        assert_eq!(app.state, AppState::Playing);
+        assert_eq!(
+            snapshot(&app),
+            before,
+            "agent resume must not reset score, player, obstacles or difficulty"
+        );
+    }
+
+    #[test]
+    fn out_of_order_events_never_panic() {
+        let mut app = app_with_size(temp_store("outoforder.json"), 100, 30);
+        app.handle_agent_event(AgentEvent::Completed);
+        app.handle_agent_event(AgentEvent::Working);
+        app.handle_agent_event(AgentEvent::NeedsInput);
+        app.handle_agent_event(AgentEvent::Stopped);
+        app.handle_agent_event(AgentEvent::Started);
+        assert_eq!(app.state, AppState::Menu);
+
+        let mut app = playing_app();
+        app.handle_agent_event(AgentEvent::Stopped);
+        app.handle_agent_event(AgentEvent::NeedsInput);
+        assert_eq!(app.state, AppState::PausedAgent(PauseReason::NeedsInput));
+        app.handle_agent_event(AgentEvent::Started);
+        assert_eq!(app.state, AppState::PausedAgent(PauseReason::NeedsInput));
+        app.handle_agent_event(AgentEvent::Working);
+        assert_eq!(app.state, AppState::Playing);
+    }
+
+    #[test]
+    fn agent_status_tracks_the_lifecycle() {
+        let mut app = playing_app();
+        app.handle_agent_event(AgentEvent::Started);
+        assert_eq!(app.agent().status, AgentStatus::Idle);
+        app.handle_agent_event(AgentEvent::Working);
+        assert_eq!(app.agent().status, AgentStatus::Working);
+        app.handle_agent_event(AgentEvent::Completed);
+        assert_eq!(app.agent().status, AgentStatus::Completed);
+        app.handle_agent_event(AgentEvent::Stopped);
+        assert_eq!(app.agent().status, AgentStatus::Stopped);
+        assert_eq!(app.agent().last_event, Some(AgentEvent::Stopped));
+    }
+
+    #[test]
+    fn setting_agent_kind_makes_the_indicator_idle() {
+        let mut app = app_with_size(temp_store("kind.json"), 100, 30);
+        app.set_agent_kind(AgentKind::ClaudeCode);
+        assert_eq!(app.agent().agent, AgentKind::ClaudeCode);
+        assert_eq!(app.agent().status, AgentStatus::Idle);
+    }
+
+    #[test]
+    fn auto_resume_is_on_by_default() {
+        let app = app_with_size(temp_store("autoresume.json"), 100, 30);
+        assert!(app.agent_auto_resume);
+    }
+
+    #[test]
+    fn disabling_auto_resume_keeps_agent_pauses_manual() {
+        let mut app = playing_app();
+        app.set_agent_auto_resume(false);
+        app.handle_agent_event(AgentEvent::NeedsInput);
+        assert_eq!(app.state, AppState::PausedAgent(PauseReason::NeedsInput));
+        app.handle_agent_event(AgentEvent::Working);
+        assert_eq!(
+            app.state,
+            AppState::PausedAgent(PauseReason::NeedsInput),
+            "auto-resume must be off"
+        );
+        app.handle_input(AppInput::Confirm);
+        assert_eq!(app.state, AppState::Playing);
     }
 }
