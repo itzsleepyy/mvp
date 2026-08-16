@@ -16,6 +16,9 @@ use crate::agent::event::AgentEvent;
 use crate::agent::status::AgentKind;
 use crate::ipc::protocol::{AgentMessage, MAX_MESSAGE_BYTES};
 
+/// Private discovery-file override inherited by hooks in a managed session.
+pub const SOCKET_ENV: &str = "WAITSTATE_SOCKET";
+
 /// Contents of the socket file clients read to reach the server.
 ///
 /// `pid` records the owning process so a *stale* socket file is recognised
@@ -185,17 +188,31 @@ fn handle_connection(stream: TcpStream, token: &str, sender: &Sender<(AgentKind,
 
 /// The per-user socket file used for discovery.
 pub fn socket_path() -> PathBuf {
-    let dir =
-        match directories::BaseDirs::new().and_then(|b| b.runtime_dir().map(Path::to_path_buf)) {
-            Some(dir) => dir,
-            None => {
-                let user = std::env::var("USER")
-                    .or_else(|_| std::env::var("USERNAME"))
-                    .unwrap_or_else(|_| "user".into());
-                std::env::temp_dir().join(format!("waitstate-{user}"))
-            }
-        };
-    dir.join("waitstate.sock")
+    if let Some(path) = std::env::var_os(SOCKET_ENV) {
+        return PathBuf::from(path);
+    }
+    socket_dir().join("waitstate.sock")
+}
+
+/// A unique discovery file for one supervised agent process.
+pub fn managed_socket_path() -> PathBuf {
+    socket_dir().join(format!(
+        "waitstate-codex-{}-{}.sock",
+        std::process::id(),
+        random_token()
+    ))
+}
+
+fn socket_dir() -> PathBuf {
+    match directories::BaseDirs::new().and_then(|b| b.runtime_dir().map(Path::to_path_buf)) {
+        Some(dir) => dir,
+        None => {
+            let user = std::env::var("USER")
+                .or_else(|_| std::env::var("USERNAME"))
+                .unwrap_or_else(|_| "user".into());
+            std::env::temp_dir().join(format!("waitstate-{user}"))
+        }
+    }
 }
 
 pub(crate) fn read_socket_info(path: &Path) -> Option<SocketInfo> {

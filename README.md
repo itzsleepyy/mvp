@@ -33,8 +33,11 @@ Requires a recent stable Rust toolchain.
 ```bash
 git clone https://github.com/itzsleepyy/waitstate
 cd waitstate
-cargo run --release
+cargo install --path .
 ```
+
+This installs a stable `waitstate` executable in Cargo's binary directory
+(`~/.cargo/bin` by default). Ensure that directory is on `PATH`.
 
 ## Controls
 
@@ -46,6 +49,14 @@ cargo run --release
 | `R` | Restart after game over |
 | `ESC` | Back to menu |
 | `Q` / `CTRL+C` | Quit |
+
+Managed Codex mode adds terminal-level controls:
+
+| Key | Action |
+| --- | --- |
+| `CTRL+]` | Toggle and persist automatic game display |
+| `ESC` / `Q` | Preserve the game and return to Codex |
+| `CTRL+C` | Return to Codex and interrupt its active turn |
 
 ## Supported coding agents
 
@@ -84,6 +95,34 @@ waitstate gemini install        # merge hooks into ~/.gemini/settings.json
 waitstate opencode install      # install the WaitState plugin into OpenCode
 ```
 
+For the integrated one-terminal Codex experience, run:
+
+```bash
+waitstate codex run
+waitstate codex run -- --model gpt-5.6-sol   # forward arguments to Codex
+```
+
+To keep typing `codex` in an interactive shell, add an optional alias:
+
+```bash
+alias codex='waitstate codex run --'
+```
+
+WaitState launches the real executable directly, so this alias does not recurse.
+
+WaitState runs the stock Codex CLI in a private pseudoterminal. After you
+submit a prompt, Stack Jump replaces Codex while it works. Permission requests,
+completed turns and session shutdown restore Codex in the same terminal while
+preserving the run for the next prompt. Codex supports this through its
+`--no-alt-screen` mode; WaitState remains the sole owner of the physical
+terminal.
+
+Automatic display defaults on. Change it persistently with
+`waitstate codex auto-play on|off|status`, or press `CTRL+]` during a managed
+session. Codex does not currently expose third-party imperative slash commands,
+so `/waitstate` cannot safely implement this toggle; the supervisor hotkey does
+not consume a model turn.
+
 Or all at once:
 
 ```bash
@@ -101,7 +140,12 @@ Each provider also has `status` and `uninstall` subcommands. Every installer:
 - is idempotent and safe to run any number of times
 - removes only WaitState-owned pieces on uninstall
 
-Then just run `waitstate` and use your agent as usual. `waitstate --agent codex` pins the status indicator to one agent; `waitstate --agent auto` follows whichever agent most recently emitted an event. With no flag, the indicator appears once the first event arrives.
+For Claude, Gemini, OpenCode, or standalone Codex mode, start `waitstate` in a
+separate terminal and use your agent as usual. The hooks notify that running
+game; only `waitstate codex run` supervises Codex and switches one terminal.
+`waitstate --agent codex` pins the standalone status indicator to one agent;
+`waitstate --agent auto` follows whichever agent most recently emitted an
+event. With no flag, the indicator appears once the first event arrives.
 
 A small status indicator (`Codex • Working`, or `2 agents • Working`) appears in the menu, HUD, pause overlays and game-over panel. A manual pause (`P`) is never overridden by agent events, and a run paused because an agent *finished* is only resumed by you (`ENTER`). Agent-paused runs freeze score, player position, obstacles and difficulty exactly where they were.
 
@@ -145,6 +189,8 @@ Codex:
 - Hooks are synchronous (verified: `async` hooks never run in `codex exec` sessions) — the bridge is one bounded local TCP connect, so the agent loop is not held up.
 - `SessionEnd` fires when the conversation closes, is archived, or idles for 30 minutes — `Stop` is the primary completion signal.
 - A failed *other* hook in the same group (e.g. a stale third-party hook) shows a hook-failure warning in Codex but does not affect WaitState's hooks.
+- Managed mode keeps Codex visible after a permission request until the next definite `Working` event. Codex does not yet expose a dedicated "approval answered" hook.
+- Managed mode currently targets interactive local terminals on macOS/Linux; hook failure, excessive hidden output, or terminal errors fail open by restoring Codex.
 
 Gemini CLI:
 
@@ -163,7 +209,14 @@ All agents:
 
 ### Privacy
 
-**WaitState knows when the agent is working, not what you are working on.** It receives lifecycle events only — it never reads your prompts, source code, tool output, repository contents or conversation history. The hook commands and IPC protocol carry nothing but an agent kind and an event name.
+In standalone mode, **WaitState knows when the agent is working, not what you
+are working on.** It receives lifecycle events only; hook commands and IPC
+carry nothing but an agent kind and event name.
+
+Managed Codex mode must relay Codex terminal input/output through memory because
+WaitState owns the physical terminal. Those bytes are never interpreted as
+prompts or code, logged, persisted or transmitted; hidden output is discarded
+from memory immediately after it is replayed to the terminal.
 
 ## Development setup
 
@@ -194,7 +247,7 @@ src/
 ├── app.rs       application state machine (Menu / Playing / PausedManual /
 │                PausedAgent / GameOver), per-agent state and the aggregate
 │                attention model
-├── config.rs    platform-aware local high-score storage
+├── config.rs    platform-aware high-score and managed-mode preferences
 ├── ui.rs        Ratatui rendering (menu, HUD, overlays, resize handling)
 ├── agent/       generic agent lifecycle events, status and adapters
 │   ├── event.rs       AgentEvent (started/working/needs-input/completed/stopped)
@@ -203,7 +256,7 @@ src/
 │   │                  idempotency, ownership checks)
 │   ├── integrations.rs  registry, detection, overview, install-all, repair
 │   ├── claude/        Claude-specific hook table + settings merge
-│   ├── codex/         Codex hook table + hooks.json merge (sync `hook` bridge)
+│   ├── codex/         hooks.json adapter + same-terminal PTY supervisor
 │   ├── gemini/        Gemini hook table + settings merge (JSON-stdout bridge)
 │   └── opencode/      OpenCode plugin generation, versioning, install
 ├── ipc/         local-only agent event transport
@@ -229,6 +282,7 @@ Key decisions:
 - **The renderer consumes a plain-data `GameRenderState` snapshot** — the engine can run headlessly, which keeps the door open for tests, replays, and server-side simulation.
 - **Manual pause and agent pause are distinct states**: agent events never override a manual pause, and auto-resume only applies to runs the agent paused (never to runs paused because an agent finished).
 - **One state machine for all agents**: adapters normalize into `AgentEvent`; per-agent statuses aggregate into one attention decision (`NeedsInput > Working > Completed > Stopped > Idle`).
+- **Managed Codex uses one terminal owner**: WaitState supervises `codex --no-alt-screen` in a child PTY, uses the alternate screen only for the game, and routes hooks through a private per-session socket.
 - **Obstacle spacing is guaranteed fair**: gaps are rolled as `speed × reaction time + jitter`, so every pattern is physically clearable as speed increases.
 - The event loop is a simple 60 FPS poll loop (crossterm) plus one plain-thread IPC listener — `tokio` was intentionally not introduced: a blocking terminal game loop gains nothing from an async runtime, and short-lived hook clients need nothing more than a channel. It can be revisited for network integrations.
 - High-score storage lives in the platform config directory (e.g. `~/.config/waitstate/`, `~/Library/Application Support/WaitState/`, `%APPDATA%\WaitState\`) and degrades gracefully on any filesystem problem.

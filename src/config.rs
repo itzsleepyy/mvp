@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 const FILE_NAME: &str = "highscore.json";
+const SETTINGS_FILE_NAME: &str = "settings.json";
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct HighScoreData {
@@ -64,6 +65,57 @@ impl HighScoreStore {
             let _ = fs::create_dir_all(parent);
         }
         let _ = fs::write(&self.path, data);
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(default)]
+struct SettingsData {
+    codex_auto_play: bool,
+}
+
+impl Default for SettingsData {
+    fn default() -> Self {
+        Self {
+            codex_auto_play: true,
+        }
+    }
+}
+
+/// Small local preferences shared by CLI management and managed sessions.
+pub struct SettingsStore {
+    path: PathBuf,
+    data: SettingsData,
+}
+
+impl SettingsStore {
+    pub fn discover() -> Self {
+        let path = directories::ProjectDirs::from("", "", "WaitState")
+            .map(|dirs| dirs.config_dir().join(SETTINGS_FILE_NAME))
+            .unwrap_or_else(|| PathBuf::from(SETTINGS_FILE_NAME));
+        Self::load(path)
+    }
+
+    fn load(path: PathBuf) -> Self {
+        let data = fs::read_to_string(&path)
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default();
+        Self { path, data }
+    }
+
+    pub fn codex_auto_play(&self) -> bool {
+        self.data.codex_auto_play
+    }
+
+    pub fn set_codex_auto_play(&mut self, enabled: bool) {
+        self.data.codex_auto_play = enabled;
+        if let Some(parent) = self.path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        if let Ok(json) = serde_json::to_string_pretty(&self.data) {
+            let _ = fs::write(&self.path, json);
+        }
     }
 }
 
@@ -144,6 +196,17 @@ mod tests {
         clean(&path);
         let mut store = HighScoreStore::load(&path);
         assert!(!store.record(0));
+        clean(&path);
+    }
+
+    #[test]
+    fn codex_auto_play_defaults_on_and_round_trips() {
+        let path = temp_path("settings.json");
+        clean(&path);
+        let mut settings = SettingsStore::load(path.clone());
+        assert!(settings.codex_auto_play());
+        settings.set_codex_auto_play(false);
+        assert!(!SettingsStore::load(path.clone()).codex_auto_play());
         clean(&path);
     }
 }

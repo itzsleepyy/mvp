@@ -8,8 +8,8 @@
 //! Codex specifics:
 //! - handler commands are shell strings (Codex has no exec-arg form), so
 //!   the binary path is shell-quoted;
-//! - every handler is `async` and returns `{}` on stdout (the `hook`
-//!   bridge), which never blocks, approves or denies anything;
+//! - every handler returns `{}` on stdout (the `hook` bridge), which never
+//!   approves or denies anything;
 //! - Codex requires non-managed hooks to be reviewed and trusted via
 //!   `/hooks` before they run the first time;
 //! - plugin packaging later can ship the same table via
@@ -81,8 +81,20 @@ impl CodexConfig {
     }
 
     /// True when all hook events have an up-to-date WaitState hook.
+    #[cfg(test)]
     pub fn hook_status(&self) -> (usize, usize) {
         self.inner.status(&hook_specs(), is_waitstate_for)
+    }
+
+    /// Status relative to the binary running this command. Unlike the
+    /// ownership-only status, this detects hooks that point at an old build.
+    pub fn current_hook_status(&self, binary: &Path) -> (usize, usize) {
+        self.inner.current_status(
+            &hook_specs(),
+            &binary.display().to_string(),
+            codex_handler,
+            is_waitstate_for,
+        )
     }
 
     /// Writes the file back, creating a timestamped backup of the previous
@@ -274,6 +286,17 @@ mod tests {
         );
         let session_start = raw["hooks"]["SessionStart"].as_array().unwrap();
         assert_eq!(session_start[0]["hooks"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn current_status_detects_a_stale_binary_path() {
+        let path = temp_config("stale_status", "");
+        let mut config = CodexConfig::load(&path).unwrap();
+        config.install_hooks(Path::new(BINARY_A));
+
+        assert_eq!(config.current_hook_status(Path::new(BINARY_A)), (6, 6));
+        assert_eq!(config.current_hook_status(Path::new(BINARY_B)), (0, 6));
+        assert_eq!(config.hook_status(), (6, 6));
     }
 
     #[test]

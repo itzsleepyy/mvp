@@ -168,6 +168,25 @@ impl HooksJson {
         (installed, specs.len())
     }
 
+    /// How many hook specs exactly match the handler the current binary
+    /// would install. This catches moved binaries and changed handler fields.
+    pub fn current_status(
+        &self,
+        specs: &[HookSpec],
+        binary: &str,
+        build: HandlerBuilder,
+        matches: HandlerMatch,
+    ) -> (usize, usize) {
+        let current = specs
+            .iter()
+            .filter(|spec| {
+                self.find_handler(spec.event, spec.agent_event, matches)
+                    .is_some_and(|handler| *handler == build(binary, spec.agent_event))
+            })
+            .count();
+        (current, specs.len())
+    }
+
     /// Writes the file back, creating a timestamped backup of the previous
     /// file first. The write is atomic (temp file + rename).
     pub fn save(&self) -> Result<(), String> {
