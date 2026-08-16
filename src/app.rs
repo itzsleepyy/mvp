@@ -1,6 +1,7 @@
+use std::collections::HashMap;
 use std::time::Duration;
 
-use crate::agent::{AgentEvent, AgentKind, AgentState};
+use crate::agent::{AgentDisplay, AgentEvent, AgentKind, AgentState, AgentStatus};
 use crate::config::HighScoreStore;
 use crate::event::AppInput;
 use crate::game::{GameInput, StackJump};
@@ -41,11 +42,19 @@ pub struct App {
     terminal_size: Option<(u16, u16)>,
     new_record: bool,
     should_quit: bool,
-    agent: AgentState,
+    /// One entry per agent kind; the aggregate view drives the UI and the
+    /// pause/resume transitions.
+    agents: HashMap<AgentKind, AgentState>,
+    /// Monotonic event counter; the agent with the highest `activity` value
+    /// most recently emitted an event.
+    activity_seq: u64,
+    /// Which agent to display (`--agent codex`, `--agent auto`).
+    display_preference: Option<AgentDisplay>,
     /// Whether an agent `Working` event may resume a run that the agent
     /// paused. Turned off in the application layer, never in the adapter.
-    /// A run paused because the agent *completed* is never auto-resumed:
-    /// the developer decides when to continue that run.
+    /// A run paused because an agent *completed* is only auto-resumed when
+    /// a different agent (or a fresh session) starts working: the developer
+    /// decides when to continue a finished run of the completing agent.
     agent_auto_resume: bool,
 }
 
@@ -58,7 +67,9 @@ impl App {
             terminal_size: None,
             new_record: false,
             should_quit: false,
-            agent: AgentState::default(),
+            agents: HashMap::new(),
+            activity_seq: 0,
+            display_preference: None,
             agent_auto_resume: true,
         }
     }
@@ -149,55 +160,167 @@ impl App {
 
     // ---- agent events -----------------------------------------------------
 
-    /// Applies one agent lifecycle event. Runs on the main loop only, so
-    /// application state stays single-threaded. Defensive by design:
-    /// duplicates are idempotent and unexpected orderings never panic —
-    /// they at most update the agent status.
-    pub fn handle_agent_event(&mut self, event: AgentEvent) {
+    /// Applies one lifecycle event from one agent. Runs on the main loop
+    /// only, so application state stays single-threaded. Defensive by
+    /// design: duplicates are idempotent and unexpected orderings never
+    /// panic — they at most update the agent status.
+    pub fn handle_agent_event(&mut self, kind: AgentKind, event: AgentEvent) {
         let before = self.state;
-        self.agent.apply(event);
+        self.activity_seq += 1;
+        let prev_status = self.agents.entry(kind).or_default().status;
+        let state = self.agents.get_mut(&kind).expect("entry exists");
+        state.apply(event);
+        state.activity = self.activity_seq;
+
         match event {
             AgentEvent::Started => {}
             AgentEvent::Working => {
-                if self.agent_auto_resume
-                    && let AppState::PausedAgent(reason) = self.state
-                    && reason != PauseReason::Completed
-                {
-                    self.state = AppState::Playing;
+                // A Completed pause is sticky for the agent that completed:
+                // only a *different* agent working (or the completing agent
+                // starting a fresh cycle) auto-resumes the run.
+                let sticky = self.state == AppState::PausedAgent(PauseReason::Completed)
+                    && prev_status == AgentStatus::Completed;
+                if !sticky {
+                    self.recompute_attention();
                 }
             }
-            AgentEvent::NeedsInput => self.set_agent_pause(PauseReason::NeedsInput),
-            AgentEvent::Completed => self.set_agent_pause(PauseReason::Completed),
-            AgentEvent::Stopped => self.set_agent_pause(PauseReason::Stopped),
+            AgentEvent::NeedsInput | AgentEvent::Completed | AgentEvent::Stopped => {
+                self.recompute_attention();
+            }
         }
         if before != self.state {
-            crate::debug_log!("agent event {event}: {before:?} → {:?}", self.state);
+            crate::debug_log!(
+                "agent event {} {event}: {before:?} → {:?}",
+                kind.id(),
+                self.state
+            );
         } else {
-            crate::debug_log!("agent event {event}: state unchanged ({:?})", self.state);
+            crate::debug_log!(
+                "agent event {} {event}: state unchanged ({:?})",
+                kind.id(),
+                self.state
+            );
         }
     }
 
-    /// Enters the agent-paused state, or replaces the pause reason when
-    /// already paused by the agent. Manual pauses are never touched.
-    fn set_agent_pause(&mut self, reason: PauseReason) {
+    /// Derives the pause/play state from the per-agent statuses:
+    ///
+    /// ```text
+    /// if ANY active agent NeedsInput → pause (needs input)
+    /// else if ANY active agent Working → play (or resume)
+    /// else if ANY agent Completed    → pause (completed)
+    /// else if ANY agent Stopped      → pause (session ended)
+    /// else                           → unchanged
+    /// ```
+    ///
+    /// Manual pauses, the menu and the game-over screen are never touched.
+    fn recompute_attention(&mut self) {
+        let needs = self.any_status(AgentStatus::NeedsInput);
+        let working = self.any_status(AgentStatus::Working);
+        let completed = self.any_status(AgentStatus::Completed);
+        let stopped = self.any_status(AgentStatus::Stopped);
         match self.state {
             AppState::Playing | AppState::PausedAgent(_) => {
-                self.state = AppState::PausedAgent(reason);
+                if needs {
+                    self.state = AppState::PausedAgent(PauseReason::NeedsInput);
+                } else if working {
+                    if self.agent_auto_resume {
+                        self.state = AppState::Playing;
+                    }
+                } else if completed {
+                    self.state = AppState::PausedAgent(PauseReason::Completed);
+                } else if stopped {
+                    self.state = AppState::PausedAgent(PauseReason::Stopped);
+                }
             }
             AppState::Menu | AppState::PausedManual | AppState::GameOver => {}
         }
     }
 
-    /// The connected agent's current status (or disconnected).
-    pub fn agent(&self) -> &AgentState {
-        &self.agent
+    fn any_status(&self, status: AgentStatus) -> bool {
+        self.agents.values().any(|s| s.status == status)
+    }
+
+    /// The connected agents' current states, or disconnected.
+    pub fn agents(&self) -> &HashMap<AgentKind, AgentState> {
+        &self.agents
+    }
+
+    /// The aggregate status over all connected agents.
+    pub fn agent_aggregate(&self) -> AgentStatus {
+        let mut aggregate = AgentStatus::Disconnected;
+        for state in self.agents.values() {
+            if state.status.attention_weight() > aggregate.attention_weight() {
+                aggregate = state.status;
+            }
+        }
+        aggregate
+    }
+
+    /// How many agents have reported in (are not disconnected).
+    #[cfg(test)]
+    pub fn connected_agent_count(&self) -> usize {
+        self.agents
+            .values()
+            .filter(|s| s.status != AgentStatus::Disconnected)
+            .count()
+    }
+
+    /// The agent whose status matches `status`, ordered by kind. Used by
+    /// the pause overlays to say *who* needs attention.
+    pub fn agents_with_status(&self, status: AgentStatus) -> Vec<AgentKind> {
+        let mut kinds: Vec<AgentKind> = self
+            .agents
+            .iter()
+            .filter(|(_, s)| s.status == status)
+            .map(|(k, _)| *k)
+            .collect();
+        kinds.sort_unstable();
+        kinds
+    }
+
+    /// Which agent the UI should display. `Specific(k)` always yields `k`;
+    /// otherwise the most recently active agent (nothing until the first
+    /// event).
+    #[cfg(test)]
+    pub fn display_focus(&self) -> Option<AgentKind> {
+        match self.display_preference {
+            Some(AgentDisplay::Specific(kind)) => Some(kind),
+            None | Some(AgentDisplay::Auto) => self.most_recent_active(),
+        }
+    }
+
+    /// The display preference set via `--agent`.
+    pub fn display_preference(&self) -> Option<AgentDisplay> {
+        self.display_preference
+    }
+
+    /// The most recently active non-disconnected agent, if any.
+    #[cfg(test)]
+    pub fn most_recent_active(&self) -> Option<AgentKind> {
+        self.agents
+            .iter()
+            .filter(|(_, s)| s.status != AgentStatus::Disconnected)
+            .max_by_key(|(_, s)| s.activity)
+            .map(|(k, _)| *k)
     }
 
     /// Announces which agent to display before any event has arrived
     /// (`--agent claude`). The indicator still shows the live status.
+    #[cfg(test)]
     pub fn set_agent_kind(&mut self, kind: AgentKind) {
-        self.agent.agent = kind;
-        self.agent.status = crate::agent::AgentStatus::Idle;
+        self.set_agent_display(Some(AgentDisplay::Specific(kind)));
+    }
+
+    /// Controls which agent the UI focuses on (`--agent auto` included).
+    pub fn set_agent_display(&mut self, display: Option<AgentDisplay>) {
+        self.display_preference = display;
+        if let Some(AgentDisplay::Specific(kind)) = display {
+            let entry = self.agents.entry(kind).or_default();
+            if entry.status == AgentStatus::Disconnected {
+                entry.status = AgentStatus::Idle;
+            }
+        }
     }
 
     /// Controls whether agent `Working` events may resume an agent-paused
@@ -288,8 +411,12 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::AgentStatus;
     use crate::game::obstacle::{Obstacle, ObstacleKind};
+
+    const C: AgentKind = AgentKind::ClaudeCode;
+    const X: AgentKind = AgentKind::Codex;
+    const G: AgentKind = AgentKind::GeminiCli;
+    const O: AgentKind = AgentKind::OpenCode;
 
     fn temp_store(name: &str) -> HighScoreStore {
         let mut path = std::env::temp_dir();
@@ -325,7 +452,8 @@ mod tests {
         assert_eq!(app.state, AppState::Menu);
         assert!(app.game().is_none());
         assert!(!app.should_quit());
-        assert_eq!(app.agent().status, AgentStatus::Disconnected);
+        assert_eq!(app.agent_aggregate(), AgentStatus::Disconnected);
+        assert_eq!(app.connected_agent_count(), 0);
     }
 
     #[test]
@@ -439,7 +567,7 @@ mod tests {
         assert_eq!(paused.state, AppState::Menu);
 
         let mut agent_paused = playing_app();
-        agent_paused.handle_agent_event(AgentEvent::NeedsInput);
+        agent_paused.handle_agent_event(C, AgentEvent::NeedsInput);
         agent_paused.handle_input(AppInput::Back);
         assert_eq!(agent_paused.state, AppState::Menu);
 
@@ -516,17 +644,17 @@ mod tests {
     fn needs_input_pauses_a_playing_game_for_the_agent() {
         let mut app = playing_app();
         app.tick(Duration::from_secs(1));
-        app.handle_agent_event(AgentEvent::NeedsInput);
+        app.handle_agent_event(C, AgentEvent::NeedsInput);
         assert_eq!(app.state, AppState::PausedAgent(PauseReason::NeedsInput));
-        assert_eq!(app.agent().status, AgentStatus::NeedsInput);
+        assert_eq!(app.agent_aggregate(), AgentStatus::NeedsInput);
     }
 
     #[test]
     fn working_resumes_an_agent_paused_game() {
         let mut app = playing_app();
-        app.handle_agent_event(AgentEvent::NeedsInput);
+        app.handle_agent_event(C, AgentEvent::NeedsInput);
         assert_eq!(app.state, AppState::PausedAgent(PauseReason::NeedsInput));
-        app.handle_agent_event(AgentEvent::Working);
+        app.handle_agent_event(C, AgentEvent::Working);
         assert_eq!(app.state, AppState::Playing);
     }
 
@@ -534,11 +662,11 @@ mod tests {
     fn manual_pause_is_never_overridden_by_agent_events() {
         let mut app = playing_app();
         app.pause();
-        app.handle_agent_event(AgentEvent::Working);
+        app.handle_agent_event(C, AgentEvent::Working);
         assert_eq!(app.state, AppState::PausedManual);
-        app.handle_agent_event(AgentEvent::NeedsInput);
+        app.handle_agent_event(X, AgentEvent::NeedsInput);
         assert_eq!(app.state, AppState::PausedManual);
-        app.handle_agent_event(AgentEvent::Completed);
+        app.handle_agent_event(G, AgentEvent::Completed);
         assert_eq!(app.state, AppState::PausedManual);
     }
 
@@ -548,38 +676,38 @@ mod tests {
         collide(&mut app);
         app.tick(Duration::from_millis(16));
         assert_eq!(app.state, AppState::GameOver);
-        app.handle_agent_event(AgentEvent::Working);
+        app.handle_agent_event(C, AgentEvent::Working);
         assert_eq!(app.state, AppState::GameOver);
-        app.handle_agent_event(AgentEvent::NeedsInput);
+        app.handle_agent_event(X, AgentEvent::NeedsInput);
         assert_eq!(app.state, AppState::GameOver);
     }
 
     #[test]
     fn menu_ignores_agent_events_without_crashing() {
         let mut app = app_with_size(temp_store("menuagent.json"), 100, 30);
-        app.handle_agent_event(AgentEvent::NeedsInput);
+        app.handle_agent_event(C, AgentEvent::NeedsInput);
         assert_eq!(app.state, AppState::Menu);
-        app.handle_agent_event(AgentEvent::Working);
+        app.handle_agent_event(X, AgentEvent::Working);
         assert_eq!(app.state, AppState::Menu);
-        app.handle_agent_event(AgentEvent::Completed);
+        app.handle_agent_event(G, AgentEvent::Completed);
         assert_eq!(app.state, AppState::Menu);
-        app.handle_agent_event(AgentEvent::Stopped);
+        app.handle_agent_event(O, AgentEvent::Stopped);
         assert_eq!(app.state, AppState::Menu);
     }
 
     #[test]
     fn duplicate_events_are_idempotent() {
         let mut app = playing_app();
-        app.handle_agent_event(AgentEvent::Working);
-        app.handle_agent_event(AgentEvent::Working);
+        app.handle_agent_event(C, AgentEvent::Working);
+        app.handle_agent_event(C, AgentEvent::Working);
         assert_eq!(app.state, AppState::Playing);
 
-        app.handle_agent_event(AgentEvent::NeedsInput);
-        app.handle_agent_event(AgentEvent::NeedsInput);
+        app.handle_agent_event(C, AgentEvent::NeedsInput);
+        app.handle_agent_event(C, AgentEvent::NeedsInput);
         assert_eq!(app.state, AppState::PausedAgent(PauseReason::NeedsInput));
 
-        app.handle_agent_event(AgentEvent::Working);
-        app.handle_agent_event(AgentEvent::Working);
+        app.handle_agent_event(C, AgentEvent::Working);
+        app.handle_agent_event(C, AgentEvent::Working);
         assert_eq!(app.state, AppState::Playing);
     }
 
@@ -587,11 +715,11 @@ mod tests {
     fn completion_pauses_the_run_and_requires_manual_resume() {
         let mut app = playing_app();
         app.tick(Duration::from_secs(1));
-        app.handle_agent_event(AgentEvent::Completed);
+        app.handle_agent_event(C, AgentEvent::Completed);
         assert_eq!(app.state, AppState::PausedAgent(PauseReason::Completed));
 
         // Claude working again does not silently continue a finished run.
-        app.handle_agent_event(AgentEvent::Working);
+        app.handle_agent_event(C, AgentEvent::Working);
         assert_eq!(app.state, AppState::PausedAgent(PauseReason::Completed));
 
         // The developer decides when to continue it.
@@ -602,16 +730,16 @@ mod tests {
     #[test]
     fn session_end_pauses_and_working_resumes() {
         let mut app = playing_app();
-        app.handle_agent_event(AgentEvent::Stopped);
+        app.handle_agent_event(C, AgentEvent::Stopped);
         assert_eq!(app.state, AppState::PausedAgent(PauseReason::Stopped));
-        app.handle_agent_event(AgentEvent::Working);
+        app.handle_agent_event(C, AgentEvent::Working);
         assert_eq!(app.state, AppState::Playing);
     }
 
     #[test]
     fn pause_input_takes_control_from_agent_pause() {
         let mut app = playing_app();
-        app.handle_agent_event(AgentEvent::NeedsInput);
+        app.handle_agent_event(C, AgentEvent::NeedsInput);
         assert_eq!(app.state, AppState::PausedAgent(PauseReason::NeedsInput));
         app.handle_input(AppInput::TogglePause);
         assert_eq!(app.state, AppState::PausedManual);
@@ -622,10 +750,10 @@ mod tests {
     #[test]
     fn later_agent_status_replaces_the_pause_reason() {
         let mut app = playing_app();
-        app.handle_agent_event(AgentEvent::NeedsInput);
-        app.handle_agent_event(AgentEvent::Completed);
+        app.handle_agent_event(C, AgentEvent::NeedsInput);
+        app.handle_agent_event(C, AgentEvent::Completed);
         assert_eq!(app.state, AppState::PausedAgent(PauseReason::Completed));
-        app.handle_agent_event(AgentEvent::NeedsInput);
+        app.handle_agent_event(C, AgentEvent::NeedsInput);
         assert_eq!(app.state, AppState::PausedAgent(PauseReason::NeedsInput));
     }
 
@@ -649,11 +777,11 @@ mod tests {
         app.tick(Duration::from_secs(2));
         let before = snapshot(&app);
 
-        app.handle_agent_event(AgentEvent::NeedsInput);
+        app.handle_agent_event(C, AgentEvent::NeedsInput);
         app.tick(Duration::from_secs(2));
         assert_eq!(snapshot(&app), before, "agent pause must freeze the run");
 
-        app.handle_agent_event(AgentEvent::Working);
+        app.handle_agent_event(C, AgentEvent::Working);
         assert_eq!(app.state, AppState::Playing);
         assert_eq!(
             snapshot(&app),
@@ -665,43 +793,43 @@ mod tests {
     #[test]
     fn out_of_order_events_never_panic() {
         let mut app = app_with_size(temp_store("outoforder.json"), 100, 30);
-        app.handle_agent_event(AgentEvent::Completed);
-        app.handle_agent_event(AgentEvent::Working);
-        app.handle_agent_event(AgentEvent::NeedsInput);
-        app.handle_agent_event(AgentEvent::Stopped);
-        app.handle_agent_event(AgentEvent::Started);
+        app.handle_agent_event(C, AgentEvent::Completed);
+        app.handle_agent_event(C, AgentEvent::Working);
+        app.handle_agent_event(C, AgentEvent::NeedsInput);
+        app.handle_agent_event(C, AgentEvent::Stopped);
+        app.handle_agent_event(C, AgentEvent::Started);
         assert_eq!(app.state, AppState::Menu);
 
         let mut app = playing_app();
-        app.handle_agent_event(AgentEvent::Stopped);
-        app.handle_agent_event(AgentEvent::NeedsInput);
+        app.handle_agent_event(C, AgentEvent::Stopped);
+        app.handle_agent_event(C, AgentEvent::NeedsInput);
         assert_eq!(app.state, AppState::PausedAgent(PauseReason::NeedsInput));
-        app.handle_agent_event(AgentEvent::Started);
+        app.handle_agent_event(C, AgentEvent::Started);
         assert_eq!(app.state, AppState::PausedAgent(PauseReason::NeedsInput));
-        app.handle_agent_event(AgentEvent::Working);
+        app.handle_agent_event(C, AgentEvent::Working);
         assert_eq!(app.state, AppState::Playing);
     }
 
     #[test]
     fn agent_status_tracks_the_lifecycle() {
         let mut app = playing_app();
-        app.handle_agent_event(AgentEvent::Started);
-        assert_eq!(app.agent().status, AgentStatus::Idle);
-        app.handle_agent_event(AgentEvent::Working);
-        assert_eq!(app.agent().status, AgentStatus::Working);
-        app.handle_agent_event(AgentEvent::Completed);
-        assert_eq!(app.agent().status, AgentStatus::Completed);
-        app.handle_agent_event(AgentEvent::Stopped);
-        assert_eq!(app.agent().status, AgentStatus::Stopped);
-        assert_eq!(app.agent().last_event, Some(AgentEvent::Stopped));
+        app.handle_agent_event(C, AgentEvent::Started);
+        assert_eq!(app.agent_aggregate(), AgentStatus::Idle);
+        app.handle_agent_event(C, AgentEvent::Working);
+        assert_eq!(app.agent_aggregate(), AgentStatus::Working);
+        app.handle_agent_event(C, AgentEvent::Completed);
+        assert_eq!(app.agent_aggregate(), AgentStatus::Completed);
+        app.handle_agent_event(C, AgentEvent::Stopped);
+        assert_eq!(app.agent_aggregate(), AgentStatus::Stopped);
+        assert_eq!(app.agents()[&C].last_event, Some(AgentEvent::Stopped));
     }
 
     #[test]
     fn setting_agent_kind_makes_the_indicator_idle() {
         let mut app = app_with_size(temp_store("kind.json"), 100, 30);
         app.set_agent_kind(AgentKind::ClaudeCode);
-        assert_eq!(app.agent().agent, AgentKind::ClaudeCode);
-        assert_eq!(app.agent().status, AgentStatus::Idle);
+        assert_eq!(app.display_focus(), Some(AgentKind::ClaudeCode));
+        assert_eq!(app.agent_aggregate(), AgentStatus::Idle);
     }
 
     #[test]
@@ -714,9 +842,9 @@ mod tests {
     fn disabling_auto_resume_keeps_agent_pauses_manual() {
         let mut app = playing_app();
         app.set_agent_auto_resume(false);
-        app.handle_agent_event(AgentEvent::NeedsInput);
+        app.handle_agent_event(C, AgentEvent::NeedsInput);
         assert_eq!(app.state, AppState::PausedAgent(PauseReason::NeedsInput));
-        app.handle_agent_event(AgentEvent::Working);
+        app.handle_agent_event(C, AgentEvent::Working);
         assert_eq!(
             app.state,
             AppState::PausedAgent(PauseReason::NeedsInput),
@@ -724,5 +852,226 @@ mod tests {
         );
         app.handle_input(AppInput::Confirm);
         assert_eq!(app.state, AppState::Playing);
+    }
+
+    // ---- multi-agent attention ---------------------------------------------
+
+    #[test]
+    fn two_agents_working_keep_the_game_playable() {
+        let mut app = playing_app();
+        app.handle_agent_event(C, AgentEvent::Working);
+        app.handle_agent_event(X, AgentEvent::Working);
+        assert_eq!(app.state, AppState::Playing);
+    }
+
+    #[test]
+    fn one_completed_agent_does_not_pause_while_another_works() {
+        let mut app = playing_app();
+        app.handle_agent_event(X, AgentEvent::Working);
+        app.handle_agent_event(C, AgentEvent::Completed);
+        assert_eq!(app.state, AppState::Playing);
+        assert_eq!(app.agent_aggregate(), AgentStatus::Working);
+    }
+
+    #[test]
+    fn needs_input_dominates_working_agents() {
+        let mut app = playing_app();
+        app.handle_agent_event(X, AgentEvent::Working);
+        app.handle_agent_event(C, AgentEvent::NeedsInput);
+        assert_eq!(app.state, AppState::PausedAgent(PauseReason::NeedsInput));
+        assert_eq!(app.agents_with_status(AgentStatus::NeedsInput), vec![C]);
+    }
+
+    #[test]
+    fn working_from_the_needing_agent_resumes_after_input() {
+        let mut app = playing_app();
+        app.handle_agent_event(X, AgentEvent::Working);
+        app.handle_agent_event(C, AgentEvent::NeedsInput);
+        assert_eq!(app.state, AppState::PausedAgent(PauseReason::NeedsInput));
+        app.handle_agent_event(C, AgentEvent::Working);
+        assert_eq!(app.state, AppState::Playing);
+    }
+
+    #[test]
+    fn two_agents_needing_input_report_both() {
+        let mut app = playing_app();
+        app.handle_agent_event(C, AgentEvent::NeedsInput);
+        app.handle_agent_event(X, AgentEvent::NeedsInput);
+        assert_eq!(app.state, AppState::PausedAgent(PauseReason::NeedsInput));
+        let needing = app.agents_with_status(AgentStatus::NeedsInput);
+        assert_eq!(needing, vec![C, X]);
+    }
+
+    #[test]
+    fn all_agents_completed_causes_a_completed_pause() {
+        let mut app = playing_app();
+        app.handle_agent_event(C, AgentEvent::Completed);
+        assert_eq!(app.state, AppState::PausedAgent(PauseReason::Completed));
+        app.handle_agent_event(X, AgentEvent::Completed);
+        assert_eq!(app.state, AppState::PausedAgent(PauseReason::Completed));
+        assert_eq!(app.agents_with_status(AgentStatus::Completed), vec![C, X]);
+    }
+
+    #[test]
+    fn completed_pause_is_sticky_for_the_completing_agent() {
+        let mut app = playing_app();
+        app.handle_agent_event(C, AgentEvent::Completed);
+        app.handle_agent_event(X, AgentEvent::Completed);
+        assert_eq!(app.state, AppState::PausedAgent(PauseReason::Completed));
+
+        // The completing agents working again never silently resumes the
+        // run; the developer decides.
+        app.handle_agent_event(C, AgentEvent::Working);
+        assert_eq!(app.state, AppState::PausedAgent(PauseReason::Completed));
+        app.handle_agent_event(X, AgentEvent::Working);
+        assert_eq!(app.state, AppState::PausedAgent(PauseReason::Completed));
+
+        app.handle_input(AppInput::Confirm);
+        assert_eq!(app.state, AppState::Playing);
+    }
+
+    #[test]
+    fn completed_pause_resumes_when_a_different_agent_works() {
+        let mut app = playing_app();
+        app.handle_agent_event(C, AgentEvent::Completed);
+        assert_eq!(app.state, AppState::PausedAgent(PauseReason::Completed));
+
+        // Codex (never completed this run) starts working: the run resumes.
+        app.handle_agent_event(X, AgentEvent::Working);
+        assert_eq!(app.state, AppState::Playing);
+    }
+
+    #[test]
+    fn completed_pause_resumes_after_a_fresh_session_start() {
+        let mut app = playing_app();
+        app.handle_agent_event(C, AgentEvent::Completed);
+        assert_eq!(app.state, AppState::PausedAgent(PauseReason::Completed));
+
+        // A new session cycle (Started → Working) is a fresh start, not the
+        // completing agent continuing its finished run.
+        app.handle_agent_event(C, AgentEvent::Started);
+        assert_eq!(app.state, AppState::PausedAgent(PauseReason::Completed));
+        app.handle_agent_event(C, AgentEvent::Working);
+        assert_eq!(app.state, AppState::Playing);
+    }
+
+    #[test]
+    fn one_stopped_agent_does_not_pause_while_another_works() {
+        let mut app = playing_app();
+        app.handle_agent_event(X, AgentEvent::Working);
+        app.handle_agent_event(C, AgentEvent::Stopped);
+        assert_eq!(app.state, AppState::Playing);
+    }
+
+    #[test]
+    fn all_agents_stopped_pauses_the_run() {
+        let mut app = playing_app();
+        app.handle_agent_event(X, AgentEvent::Stopped);
+        assert_eq!(app.state, AppState::PausedAgent(PauseReason::Stopped));
+    }
+
+    #[test]
+    fn phase_3_key_scenario_all_agents_working() {
+        // §55: the architectural test of the whole phase.
+        let mut app = playing_app();
+        app.handle_agent_event(C, AgentEvent::Working);
+        app.handle_agent_event(X, AgentEvent::Working);
+        app.handle_agent_event(G, AgentEvent::Working);
+        assert_eq!(app.state, AppState::Playing);
+
+        // Codex needs attention → pause, Codex is flagged.
+        app.handle_agent_event(X, AgentEvent::NeedsInput);
+        assert_eq!(app.state, AppState::PausedAgent(PauseReason::NeedsInput));
+        assert_eq!(app.agents_with_status(AgentStatus::NeedsInput), vec![X]);
+
+        // Codex is unblocked → resume.
+        app.handle_agent_event(X, AgentEvent::Working);
+        assert_eq!(app.state, AppState::Playing);
+
+        // Claude and Codex finish; Gemini is still working → playable.
+        app.handle_agent_event(C, AgentEvent::Completed);
+        assert_eq!(app.state, AppState::Playing);
+        app.handle_agent_event(X, AgentEvent::Completed);
+        assert_eq!(app.state, AppState::Playing);
+
+        // Gemini finishes too → completion pause.
+        app.handle_agent_event(G, AgentEvent::Completed);
+        assert_eq!(app.state, AppState::PausedAgent(PauseReason::Completed));
+    }
+
+    #[test]
+    fn manual_pause_survives_any_number_of_working_events() {
+        let mut app = playing_app();
+        app.pause();
+        app.handle_agent_event(C, AgentEvent::Working);
+        app.handle_agent_event(X, AgentEvent::Working);
+        app.handle_agent_event(G, AgentEvent::Working);
+        app.handle_agent_event(O, AgentEvent::Working);
+        assert_eq!(app.state, AppState::PausedManual);
+    }
+
+    #[test]
+    fn game_over_survives_multi_agent_lifecycle() {
+        let mut app = playing_app();
+        collide(&mut app);
+        app.tick(Duration::from_millis(16));
+        assert_eq!(app.state, AppState::GameOver);
+        app.handle_agent_event(C, AgentEvent::Working);
+        app.handle_agent_event(X, AgentEvent::NeedsInput);
+        app.handle_agent_event(G, AgentEvent::Completed);
+        app.handle_agent_event(O, AgentEvent::Stopped);
+        assert_eq!(app.state, AppState::GameOver);
+    }
+
+    #[test]
+    fn most_recently_active_agent_is_tracked() {
+        let mut app = playing_app();
+        assert_eq!(app.most_recent_active(), None);
+
+        app.handle_agent_event(C, AgentEvent::Working);
+        assert_eq!(app.most_recent_active(), Some(C));
+        app.handle_agent_event(X, AgentEvent::Working);
+        assert_eq!(app.most_recent_active(), Some(X));
+        app.handle_agent_event(C, AgentEvent::Working);
+        assert_eq!(app.most_recent_active(), Some(C));
+    }
+
+    #[test]
+    fn display_focus_defaults_to_most_recent_activity() {
+        let mut app = playing_app();
+        assert_eq!(app.display_focus(), None);
+        app.handle_agent_event(X, AgentEvent::Working);
+        assert_eq!(app.display_focus(), Some(X));
+    }
+
+    #[test]
+    fn display_focus_auto_follows_the_most_recent_agent() {
+        let mut app = playing_app();
+        app.set_agent_display(Some(AgentDisplay::Auto));
+        assert_eq!(app.display_focus(), None);
+        app.handle_agent_event(C, AgentEvent::Working);
+        assert_eq!(app.display_focus(), Some(C));
+        app.handle_agent_event(G, AgentEvent::Working);
+        assert_eq!(app.display_focus(), Some(G));
+    }
+
+    #[test]
+    fn display_focus_specific_is_sticky() {
+        let mut app = playing_app();
+        app.set_agent_kind(X);
+        app.handle_agent_event(C, AgentEvent::Working);
+        assert_eq!(app.display_focus(), Some(X));
+    }
+
+    #[test]
+    fn per_agent_states_are_independent() {
+        let mut app = playing_app();
+        app.handle_agent_event(C, AgentEvent::Working);
+        app.handle_agent_event(X, AgentEvent::NeedsInput);
+        assert_eq!(app.agents()[&C].status, AgentStatus::Working);
+        assert_eq!(app.agents()[&X].status, AgentStatus::NeedsInput);
+        assert_eq!(app.agents()[&C].last_event, Some(AgentEvent::Working));
+        assert_eq!(app.agents()[&X].last_event, Some(AgentEvent::NeedsInput));
+        assert!(app.agents().get(&G).is_none());
     }
 }

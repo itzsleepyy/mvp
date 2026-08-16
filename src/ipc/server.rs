@@ -13,6 +13,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::agent::event::AgentEvent;
+use crate::agent::status::AgentKind;
 use crate::ipc::protocol::{AgentMessage, MAX_MESSAGE_BYTES};
 
 /// Contents of the socket file clients read to reach the server.
@@ -26,7 +27,7 @@ pub struct SocketInfo {
 /// A bound, listening IPC server. Dropping it removes the socket file and
 /// stops the background thread.
 pub struct IpcServer {
-    receiver: Receiver<AgentEvent>,
+    receiver: Receiver<(AgentKind, AgentEvent)>,
     running: Arc<AtomicBool>,
     port: u16,
     socket_path: PathBuf,
@@ -77,7 +78,7 @@ impl IpcServer {
 
     /// Drains all currently queued events. Called once per frame from the
     /// application loop so state changes stay single-threaded.
-    pub fn try_recv(&self) -> Option<AgentEvent> {
+    pub fn try_recv(&self) -> Option<(AgentKind, AgentEvent)> {
         self.receiver.try_recv().ok()
     }
 
@@ -108,7 +109,7 @@ fn accept_loop(
     running: Arc<AtomicBool>,
     token: String,
     socket_path: PathBuf,
-    sender: Sender<AgentEvent>,
+    sender: Sender<(AgentKind, AgentEvent)>,
 ) {
     // Any accept error (WouldBlock, EMFILE under load, ...) is transient:
     // sleep and retry. The loop only exits when the shutdown flag flips;
@@ -126,7 +127,7 @@ fn accept_loop(
 /// Reads one message from a connection, validates it and forwards the event.
 /// Everything invalid is dropped silently — the client is untrusted and the
 /// server must survive arbitrary garbage.
-fn handle_connection(stream: TcpStream, token: &str, sender: &Sender<AgentEvent>) {
+fn handle_connection(stream: TcpStream, token: &str, sender: &Sender<(AgentKind, AgentEvent)>) {
     // On BSD-derived systems (macOS) accepted sockets inherit the
     // listener's non-blocking flag: without this, the first read can race
     // the client's write and return EAGAIN before any data arrives.
@@ -141,11 +142,11 @@ fn handle_connection(stream: TcpStream, token: &str, sender: &Sender<AgentEvent>
     let Ok(message) = serde_json::from_str::<AgentMessage>(line.trim()) else {
         return;
     };
-    let Ok(event) = message.validate(token) else {
+    let Ok((kind, event)) = message.validate(token) else {
         return;
     };
     // Best-effort delivery; a full channel only loses a duplicate event.
-    let _ = sender.send(event);
+    let _ = sender.send((kind, event));
 }
 
 /// The per-user socket file used for discovery.
@@ -242,9 +243,9 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         let server = IpcServer::start(path.clone()).unwrap().unwrap();
 
-        crate::ipc::client::send_event_to(path, AgentEvent::Working).unwrap();
+        crate::ipc::client::send_event_to(path, AgentKind::Codex, AgentEvent::Working).unwrap();
         let received = wait_for(|| server.try_recv(), Duration::from_secs(2));
-        assert_eq!(received, Some(AgentEvent::Working));
+        assert_eq!(received, Some((AgentKind::Codex, AgentEvent::Working)));
     }
 
     #[test]
@@ -253,16 +254,16 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         let server = IpcServer::start(path.clone()).unwrap().unwrap();
 
-        for event in [
-            AgentEvent::Started,
-            AgentEvent::Working,
-            AgentEvent::NeedsInput,
-            AgentEvent::Completed,
-            AgentEvent::Stopped,
+        for (kind, event) in [
+            (AgentKind::ClaudeCode, AgentEvent::Started),
+            (AgentKind::Codex, AgentEvent::Working),
+            (AgentKind::GeminiCli, AgentEvent::NeedsInput),
+            (AgentKind::OpenCode, AgentEvent::Completed),
+            (AgentKind::ClaudeCode, AgentEvent::Stopped),
         ] {
-            crate::ipc::client::send_event_to(path.clone(), event).unwrap();
+            crate::ipc::client::send_event_to(path.clone(), kind, event).unwrap();
             let received = wait_for(|| server.try_recv(), Duration::from_secs(2));
-            assert_eq!(received, Some(event));
+            assert_eq!(received, Some((kind, event)));
         }
     }
 
@@ -287,14 +288,14 @@ mod tests {
         // Valid JSON, valid shape, but the wrong token.
         raw_send(
             &path,
-            "{\"version\":1,\"token\":\"wrong\",\"event\":\"working\"}\n",
+            "{\"version\":2,\"token\":\"wrong\",\"agent\":\"codex\",\"event\":\"working\"}\n",
         )
         .unwrap();
         // Valid JSON, valid token, unsupported version.
         raw_send(
             &path,
             &format!(
-                "{{\"version\":99,\"token\":\"{}\",\"event\":\"working\"}}\n",
+                "{{\"version\":99,\"token\":\"{}\",\"agent\":\"codex\",\"event\":\"working\"}}\n",
                 info.token
             ),
         )
@@ -303,7 +304,16 @@ mod tests {
         raw_send(
             &path,
             &format!(
-                "{{\"version\":1,\"token\":\"{}\",\"event\":\"explode\"}}\n",
+                "{{\"version\":2,\"token\":\"{}\",\"agent\":\"codex\",\"event\":\"explode\"}}\n",
+                info.token
+            ),
+        )
+        .unwrap();
+        // Valid JSON, valid token, unknown agent.
+        raw_send(
+            &path,
+            &format!(
+                "{{\"version\":2,\"token\":\"{}\",\"agent\":\"warp\",\"event\":\"working\"}}\n",
                 info.token
             ),
         )
@@ -313,9 +323,13 @@ mod tests {
         assert!(server.try_recv().is_none());
 
         // The server is still healthy: a valid message still arrives.
-        crate::ipc::client::send_event_to(path, AgentEvent::NeedsInput).unwrap();
+        crate::ipc::client::send_event_to(path, AgentKind::GeminiCli, AgentEvent::NeedsInput)
+            .unwrap();
         let received = wait_for(|| server.try_recv(), Duration::from_secs(2));
-        assert_eq!(received, Some(AgentEvent::NeedsInput));
+        assert_eq!(
+            received,
+            Some((AgentKind::GeminiCli, AgentEvent::NeedsInput))
+        );
     }
 
     #[test]
@@ -362,9 +376,27 @@ mod tests {
         let path = temp_socket_path("gone");
         let _ = std::fs::remove_file(&path);
         let start = std::time::Instant::now();
-        let result = crate::ipc::client::send_event_to(path, AgentEvent::Working);
+        let result =
+            crate::ipc::client::send_event_to(path, AgentKind::ClaudeCode, AgentEvent::Working);
         assert!(result.is_err());
         assert!(start.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn v1_messages_are_accepted_as_claude() {
+        let path = temp_socket_path("v1compat");
+        let _ = std::fs::remove_file(&path);
+        let server = IpcServer::start(path.clone()).unwrap().unwrap();
+
+        raw_send(
+            &path,
+            "{\"version\":1,\"token\":\"PLACEHOLDER\",\"event\":\"working\"}\n"
+                .replacen("PLACEHOLDER", &read_socket_info(&path).unwrap().token, 1)
+                .as_str(),
+        )
+        .unwrap();
+        let received = wait_for(|| server.try_recv(), Duration::from_secs(2));
+        assert_eq!(received, Some((AgentKind::ClaudeCode, AgentEvent::Working)));
     }
 
     #[test]
