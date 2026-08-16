@@ -2,7 +2,7 @@
 
 > A competitive terminal arcade for the time between prompts. Play quick games while your coding agent works, compete on leaderboards, and jump straight back in when it needs you.
 
-**Status: early development.** WaitState currently ships its first playable game — *Stack Jump* — with local scoring. Everything else on the roadmap is still to come.
+**Status: early development.** WaitState currently ships its first playable game — *Stack Jump* — with local scoring and local coding-agent integrations for Claude Code, Codex, Gemini CLI and OpenCode. Everything else on the roadmap is still to come.
 
 ## What is WaitState?
 
@@ -20,6 +20,9 @@ Games are designed for very short bursts — one button, instant restart, no tut
 - [x] First playable game (Stack Jump)
 - [x] Local high-score persistence
 - [x] Claude Code integration
+- [x] Codex integration
+- [x] Gemini CLI integration
+- [x] OpenCode integration
 - [ ] GitHub authentication
 - [ ] Global leaderboards
 
@@ -44,56 +47,123 @@ cargo run --release
 | `ESC` | Back to menu |
 | `Q` / `CTRL+C` | Quit |
 
-## Claude Code integration
+## Supported coding agents
 
-WaitState watches Claude Code's lifecycle and gets out of the way the moment Claude needs you:
+| Agent | Integration | Auto pause | Auto resume |
+| --- | --- | --- | --- |
+| Claude Code | Hooks | Yes | Yes |
+| Codex | Hooks | Yes | Yes |
+| Gemini CLI | Hooks | Yes | Yes |
+| OpenCode | Plugin events | Yes | Yes |
+
+One lifecycle platform, four adapters. Every agent maps its native lifecycle into the same generic event model, so the game behaves identically no matter which agent you use — including several agents working at once.
 
 ```text
-Claude works        → WaitState is playable
-Claude needs input  → WaitState pauses automatically, run preserved
-Claude works again  → WaitState resumes the same run
-Claude finishes     → run pauses with a clear "CLAUDE FINISHED" panel
+                 ┌─ Claude hooks
+                 ├─ Codex hooks
+Agent adapters ◄─┼─ Gemini hooks
+                 └─ OpenCode plugin
+                       │
+                       ▼
+                  AgentEvent
+                       │
+                       ▼
+                      IPC
+                       │
+                       ▼
+                WaitState App
 ```
 
 ### Setup
 
 ```bash
-waitstate claude install     # merge WaitState hooks into ~/.claude/settings.json (idempotent, backs up first)
-waitstate claude status      # show integration status
-waitstate claude uninstall   # remove only WaitState-owned hooks
+waitstate integrations          # overview of every integration
+waitstate claude install        # merge hooks into Claude settings (idempotent, backs up first)
+waitstate codex install         # merge hooks into ~/.codex/hooks.json
+waitstate gemini install        # merge hooks into ~/.gemini/settings.json
+waitstate opencode install      # install the WaitState plugin into OpenCode
 ```
 
-Then just run `waitstate` (optionally `waitstate --agent claude` to show the Claude status indicator from the start) and use Claude Code as usual.
+Or all at once:
 
-The installer merges into your existing `~/.claude/settings.json` (or `$CLAUDE_CONFIG_DIR/settings.json`) without touching unrelated settings, hooks, permissions or plugins. It refuses to modify unparseable files, creates a timestamped backup before writing, and is safe to run any number of times. Uninstalling removes only the hooks WaitState added.
+```bash
+waitstate integrations install         # install for detected agents only
+waitstate integrations install --all   # install every supported agent
+waitstate integrations repair          # fix missing/outdated pieces
+```
 
-A small status indicator (`Claude Code • Working`) appears in the menu, HUD, pause overlays and game-over panel. A manual pause (`P`) is never overridden by Claude events, and a run paused because Claude *finished* is only resumed by you (`ENTER`). Agent-paused runs freeze score, player position, obstacles and difficulty exactly where they were.
+Each provider also has `status` and `uninstall` subcommands. Every installer:
+
+- discovers the right configuration location (honouring `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `XDG_CONFIG_HOME`)
+- merges without touching unrelated settings, hooks, plugins or files
+- refuses to modify unparseable or foreign files
+- creates a timestamped backup before writing
+- is idempotent and safe to run any number of times
+- removes only WaitState-owned pieces on uninstall
+
+Then just run `waitstate` and use your agent as usual. `waitstate --agent codex` pins the status indicator to one agent; `waitstate --agent auto` follows whichever agent most recently emitted an event. With no flag, the indicator appears once the first event arrives.
+
+A small status indicator (`Codex • Working`, or `2 agents • Working`) appears in the menu, HUD, pause overlays and game-over panel. A manual pause (`P`) is never overridden by agent events, and a run paused because an agent *finished* is only resumed by you (`ENTER`). Agent-paused runs freeze score, player position, obstacles and difficulty exactly where they were.
+
+### Attention model (multiple agents)
+
+Multiple agents can work at once. WaitState keeps per-agent state and derives one aggregate status:
+
+```text
+if ANY active agent NeedsInput → pause ("CODEX NEEDS YOU", "2 AGENTS NEED YOU", …)
+else if ANY active agent Working → play / resume
+else if ANY agent Completed    → completion pause
+else if ANY agent Stopped      → session-ended pause
+```
+
+A completion pause is sticky for the completing agent: that agent working again never silently resumes the run — only a *different* agent working, a fresh session, or your `ENTER` does.
 
 ### How it works
 
-Claude Code's official [hooks](https://docs.anthropic.com/en/docs/claude-code/hooks) run `waitstate agent-event <event>` — a fire-and-forget command that never blocks Claude (async, short timeout, exit 0, no output). Events travel over a local-only loopback IPC socket (per-user, token-protected, protocol-versioned) to the running game, where a generic agent-agnostic event model drives the state machine:
+Each adapter's official lifecycle mechanism runs a WaitState bridge command that never blocks the agent (exit 0, bounded timeout, no output — or exactly `{}` where the hook protocol requires JSON). Events travel over a local-only loopback IPC socket (per-user, token-protected, protocol-versioned, agent-identified) to the running game, where the generic event model drives the state machine:
 
-| Claude hook | WaitState event |
-| --- | --- |
-| `SessionStart` | `Started` |
-| `UserPromptSubmit`, `PostToolUse` | `Working` |
-| `Notification` (`permission_prompt`, `agent_needs_input`, `elicitation_*`) | `NeedsInput` |
-| `Stop` | `Completed` |
-| `SessionEnd` | `Stopped` |
+| WaitState event | Claude Code | Codex | Gemini CLI | OpenCode |
+| --- | --- | --- | --- | --- |
+| `Started` | `SessionStart` | `SessionStart` | `SessionStart` | `session.created` |
+| `Working` | `UserPromptSubmit`, `PostToolUse` | `UserPromptSubmit`, `PostToolUse` | `BeforeAgent`, `BeforeTool`, `AfterTool` | `session.status` busy, `tool.execute.before/after`, `permission.replied` |
+| `NeedsInput` | `Notification` (permission/input dialogs) | `PermissionRequest` | `Notification` (tool permissions) | `permission.ask` |
+| `Completed` | `Stop` | `Stop` | `AfterAgent` | `session.status` idle |
+| `Stopped` | `SessionEnd` | `SessionEnd` | `SessionEnd` | `session.deleted` |
 
-Claude-specific knowledge lives only in the adapter; future Codex/Gemini CLI/OpenCode integrations map into the same generic events.
+Agent-specific knowledge lives only in each adapter (`src/agent/claude`, `codex`, `gemini`, `opencode`); the app, IPC and UI are agent-agnostic.
 
 ### Known limitations
 
-- Claude's `permission_prompt` notification fires ~6 seconds after the prompt appears, so the pause is not instant for permission requests.
+Claude Code:
+
+- `permission_prompt` fires ~6 seconds after the prompt appears, so the pause is not instant for permission requests.
 - `Stop` is per-turn and does not fire on user interrupts or API errors.
-- Multiple Claude sessions are treated as one logical agent stream.
-- `agent_needs_input`/`agent_completed` notifications require Claude Code v2.1.198+ and only fire for background sessions while the agent view is open.
-- Packaging as an official Claude Code plugin (marketplace distribution) is planned but not implemented yet.
+
+Codex:
+
+- Non-managed hooks must be reviewed and trusted via `/hooks` in Codex before they run the first time (`waitstate codex status` reminds you). Untrusted hooks run sandboxed, where the WaitState binary may be unreachable.
+- Hooks are synchronous (verified: `async` hooks never run in `codex exec` sessions) — the bridge is one bounded local TCP connect, so the agent loop is not held up.
+- `SessionEnd` fires when the conversation closes, is archived, or idles for 30 minutes — `Stop` is the primary completion signal.
+- A failed *other* hook in the same group (e.g. a stale third-party hook) shows a hook-failure warning in Codex but does not affect WaitState's hooks.
+
+Gemini CLI:
+
+- Hooks are always synchronous; the `timeout` (2000 ms) bounds a hung bridge.
+- `Notification` currently only fires for tool-permission alerts.
+
+OpenCode:
+
+- `session.error` is deliberately unmapped (an errored session is not a clean completion).
+- The plugin spawns the WaitState binary per event; if WaitState is not running, the spawn fails silently.
+
+All agents:
+
+- Multiple sessions of the same agent are treated as one logical agent stream.
+- Plugin/extension marketplace distribution (official Codex plugin, Gemini extension, npm OpenCode plugin) is planned but not implemented yet.
 
 ### Privacy
 
-**WaitState knows when the agent is working, not what you are working on.** It receives lifecycle events only — it never reads your prompts, source code, tool output, repository contents or conversation history. The hook commands and IPC protocol carry nothing but an event name.
+**WaitState knows when the agent is working, not what you are working on.** It receives lifecycle events only — it never reads your prompts, source code, tool output, repository contents or conversation history. The hook commands and IPC protocol carry nothing but an agent kind and an event name.
 
 ## Development setup
 
@@ -117,21 +187,29 @@ Input → Application → Game State → Game Simulation → Rendering
 ```
 src/
 ├── main.rs      entry point: CLI dispatch and event loop
-├── cli.rs       subcommands (play, agent-event, claude install/status/uninstall)
+├── cli.rs       subcommands (play, agent-event, hook, per-agent install/
+│                status/uninstall, integrations overview/install/repair)
 ├── tui.rs       terminal init/restore (raw mode, alternate screen, panic hook)
 ├── event.rs     crossterm events → application inputs
 ├── app.rs       application state machine (Menu / Playing / PausedManual /
-│                PausedAgent / GameOver) and agent event handling
+│                PausedAgent / GameOver), per-agent state and the aggregate
+│                attention model
 ├── config.rs    platform-aware local high-score storage
 ├── ui.rs        Ratatui rendering (menu, HUD, overlays, resize handling)
-├── agent/       generic agent lifecycle events and status
-│   ├── event.rs     AgentEvent (started/working/needs-input/completed/stopped)
-│   ├── status.rs    AgentKind/AgentStatus/AgentState
-│   └── claude/      Claude-specific adapter: hook table + settings merge
+├── agent/       generic agent lifecycle events, status and adapters
+│   ├── event.rs       AgentEvent (started/working/needs-input/completed/stopped)
+│   ├── status.rs      AgentKind/AgentStatus/AgentState/AgentDisplay
+│   ├── hooks_json.rs  shared non-destructive JSON hook merging (backups,
+│   │                  idempotency, ownership checks)
+│   ├── integrations.rs  registry, detection, overview, install-all, repair
+│   ├── claude/        Claude-specific hook table + settings merge
+│   ├── codex/         Codex hook table + hooks.json merge (sync `hook` bridge)
+│   ├── gemini/        Gemini hook table + settings merge (JSON-stdout bridge)
+│   └── opencode/      OpenCode plugin generation, versioning, install
 ├── ipc/         local-only agent event transport
-│   ├── protocol.rs  versioned, token-checked message schema
+│   ├── protocol.rs  versioned, token-checked, agent-identified messages
 │   ├── server.rs    loopback listener thread → channel → main loop
-│   └── client.rs    one-shot event sender (used by Claude hooks)
+│   └── client.rs    one-shot event sender (used by hook bridges)
 └── game/        pure game logic, no terminal types
     ├── mod.rs       StackJump game and the headless update loop
     ├── state.rs     run state
@@ -149,9 +227,10 @@ Key decisions:
 - **All state transitions are programmatic methods** (`pause()`, `start_game()`, `handle_agent_event(...)`, …). Keyboard input and agent lifecycle events drive the same state machine without knowing about each other.
 - **Agent events arrive on a channel and are applied on the main loop** — application state stays single-threaded, no locks.
 - **The renderer consumes a plain-data `GameRenderState` snapshot** — the engine can run headlessly, which keeps the door open for tests, replays, and server-side simulation.
-- **Manual pause and agent pause are distinct states**: agent events never override a manual pause, and auto-resume only applies to runs the agent paused (never to runs paused because Claude finished).
+- **Manual pause and agent pause are distinct states**: agent events never override a manual pause, and auto-resume only applies to runs the agent paused (never to runs paused because an agent finished).
+- **One state machine for all agents**: adapters normalize into `AgentEvent`; per-agent statuses aggregate into one attention decision (`NeedsInput > Working > Completed > Stopped > Idle`).
 - **Obstacle spacing is guaranteed fair**: gaps are rolled as `speed × reaction time + jitter`, so every pattern is physically clearable as speed increases.
-- The event loop is a simple 60 FPS poll loop (crossterm) plus one plain-thread IPC listener — `tokio` was intentionally not introduced: a blocking terminal game loop gains nothing from an async runtime, and one short-lived hook client at a time needs nothing more than a channel. It can be revisited for network/agent integrations.
+- The event loop is a simple 60 FPS poll loop (crossterm) plus one plain-thread IPC listener — `tokio` was intentionally not introduced: a blocking terminal game loop gains nothing from an async runtime, and short-lived hook clients need nothing more than a channel. It can be revisited for network integrations.
 - High-score storage lives in the platform config directory (e.g. `~/.config/waitstate/`, `~/Library/Application Support/WaitState/`, `%APPDATA%\WaitState\`) and degrades gracefully on any filesystem problem.
 
 ## Roadmap
@@ -161,13 +240,13 @@ Key decisions:
 [x] First playable game (Stack Jump)
 [x] Local scoring
 [x] Claude Code integration
+[x] Codex integration
+[x] Gemini CLI integration
+[x] OpenCode integration
 [ ] GitHub authentication
 [ ] Global leaderboards
 [ ] Friend leaderboards
 [ ] Additional games
-[ ] Codex integration
-[ ] Gemini CLI integration
-[ ] OpenCode integration
 [ ] Multiplayer
 ```
 
