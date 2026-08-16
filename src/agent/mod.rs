@@ -8,6 +8,7 @@
 //! Privacy principle: WaitState receives lifecycle events only. It never
 //! sees prompts, tool inputs, source code or agent output.
 
+pub mod claude;
 pub mod event;
 pub mod status;
 
