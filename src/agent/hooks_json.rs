@@ -1,4 +1,4 @@
-//! Shared machinery for merging WaitState hooks into a JSON settings file.
+//! Shared machinery for merging MVP hooks into a JSON settings file.
 //!
 //! Claude Code (`~/.claude/settings.json`), Codex (`~/.codex/hooks.json`)
 //! and Gemini CLI (`~/.gemini/settings.json`) all configure hooks with the
@@ -62,10 +62,10 @@ pub struct HookSpec {
 /// `agent_event`.
 pub type HandlerBuilder = fn(binary: &str, agent_event: AgentEvent) -> Value;
 
-/// True for any WaitState-owned handler, whatever event it sends.
+/// True for any MVP-owned handler, whatever event it sends.
 pub type OwnedCheck = fn(handler: &Value) -> bool;
 
-/// True for a WaitState-owned handler sending `agent_event`.
+/// True for a MVP-owned handler sending `agent_event`.
 pub type HandlerMatch = fn(handler: &Value, agent_event: AgentEvent) -> bool;
 
 /// A parsed JSON hooks file, loaded for merging.
@@ -99,7 +99,7 @@ impl HooksJson {
     }
 
     /// Merges the hook set into the file. `binary` is the display form of
-    /// the waitstate executable embedded into each handler. Returns the
+    ///    the mvp executable embedded into each handler. Returns the
     /// number of changes made (0 when already installed and up to date).
     /// Existing hooks and all other settings are preserved.
     pub fn install(
@@ -156,7 +156,7 @@ impl HooksJson {
         removed
     }
 
-    /// How many of the hook specs have an up-to-date WaitState handler.
+    /// How many of the hook specs have an up-to-date MVP handler.
     pub fn status(&self, specs: &[HookSpec], matches: HandlerMatch) -> (usize, usize) {
         let installed = specs
             .iter()
@@ -210,7 +210,7 @@ impl HooksJson {
         Ok(())
     }
 
-    /// Merges one hook entry: updates an existing WaitState handler (stale
+    /// Merges one hook entry: updates an existing MVP handler (stale
     /// binary path), or appends a handler to a matcher-compatible group, or
     /// creates a fresh group. Returns true when the file changed.
     fn merge_entry(

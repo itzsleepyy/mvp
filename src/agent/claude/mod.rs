@@ -16,7 +16,7 @@
 //! | `Stop`                 | (all)                                    | `Completed`|
 //! | `SessionEnd`           | (all)                                    | `Stopped`  |
 //!
-//! Every hook runs `waitstate agent-event <event>` in exec form
+//! Every hook runs `mvp agent-event <event>` in exec form
 //! (`command` + `args`, no shell) with `async: true` and a short timeout,
 //! so it can never block Claude Code. `PostToolUse` is included because a
 //! tool call after a permission approval is the only signal that Claude
@@ -85,41 +85,38 @@ pub const HOOKS: &[HookEntry] = &[
     },
 ];
 
-/// Installs the WaitState hooks into the user's Claude Code settings.
+/// Installs the MVP hooks into the user's Claude Code settings.
 /// Idempotent; never modifies the file if it cannot be parsed.
 pub fn install() -> Result<(), String> {
     let path = config_path();
     let mut config = ClaudeConfig::load(&path)?;
-    let binary = std::env::current_exe()
-        .map_err(|e| format!("cannot resolve the waitstate binary path: {e}"))?;
+    let binary =
+        std::env::current_exe().map_err(|e| format!("cannot resolve the mvp binary path: {e}"))?;
     let changes = config.install_hooks(&binary);
 
     if changes == 0 {
-        println!("WaitState hooks are already installed and up to date.");
+        println!("MVP hooks are already installed and up to date.");
         println!("Config: {}", path.display());
         return Ok(());
     }
     config.save()?;
-    println!(
-        "WaitState hooks installed ({changes} change{})",
-        plural(changes)
-    );
+    println!("MVP hooks installed ({changes} change{})", plural(changes));
     println!("Config: {}", path.display());
     println!("A backup of the previous settings was saved next to it.");
     Ok(())
 }
 
-/// Removes only WaitState-owned hooks. Idempotent.
+/// Removes only MVP-owned hooks. Idempotent.
 pub fn uninstall() -> Result<(), String> {
     let path = config_path();
     let mut config = ClaudeConfig::load(&path)?;
     let removed = config.uninstall_hooks();
     if removed == 0 {
-        println!("No WaitState hooks found — nothing to remove.");
+        println!("No MVP hooks found — nothing to remove.");
         return Ok(());
     }
     config.save()?;
-    println!("Removed {removed} WaitState hook{}.", plural(removed));
+    println!("Removed {removed} MVP hook{}.", plural(removed));
     println!("Config: {}", path.display());
     println!("A backup of the previous settings was saved next to it.");
     Ok(())
@@ -145,16 +142,16 @@ pub fn status() {
     };
     println!("Hooks:      {hooks_line}");
 
-    let waitstate_running = ipc::client::running();
+    let mvp_running = ipc::client::running();
     println!(
-        "WaitState:  {}",
-        if waitstate_running {
+        "MVP:     {}",
+        if mvp_running {
             "running"
         } else {
             "not running"
         }
     );
-    if waitstate_running {
+    if mvp_running {
         println!("IPC:        connected");
     }
 
@@ -162,7 +159,7 @@ pub fn status() {
     let overall = match (
         hooks_line.starts_with("installed"),
         hooks_line.starts_with("partial"),
-        waitstate_running,
+        mvp_running,
     ) {
         (true, _, true) => "ready",
         (true, _, false) => "hooks configured",
@@ -193,7 +190,7 @@ pub fn status_state() -> ProviderStatus {
     }
 }
 
-/// True when any WaitState pieces exist but are missing/stale.
+/// True when any MVP pieces exist but are missing/stale.
 pub fn needs_repair() -> bool {
     matches!(status_state(), ProviderStatus::Outdated(_))
 }
@@ -207,7 +204,8 @@ fn config_dir_present() -> bool {
     config_path().parent().is_some_and(|dir| dir.exists())
 }
 
-/// The user-level Claude settings file, honouring `CLAUDE_CONFIG_DIR`.
+/// True when the executable at `path` is one MVP owns hooks with
+/// (including the pre-rebrand `waitstate` names).
 pub fn binary_name_matches(path: &Path) -> bool {
     let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
         return false;
@@ -215,7 +213,7 @@ pub fn binary_name_matches(path: &Path) -> bool {
     // `Path::file_name` does not split on `\` when running on unix; handle
     // Windows-style paths (tests, cross-machine configs) manually.
     let name = name.rsplit('\\').next().unwrap_or(name);
-    matches!(name, "waitstate" | "waitstate.exe")
+    crate::agent::owned_binary_name(name)
 }
 
 #[cfg(test)]
@@ -252,9 +250,13 @@ mod tests {
 
     #[test]
     fn binary_name_matches_our_executable() {
-        assert!(binary_name_matches(Path::new("/usr/local/bin/waitstate")));
-        assert!(binary_name_matches(Path::new("C:\\tools\\waitstate.exe")));
+        assert!(binary_name_matches(Path::new("/usr/local/bin/mvp")));
+        assert!(binary_name_matches(Path::new("C:\\tools\\mvp.exe")));
+        assert!(
+            binary_name_matches(Path::new("/usr/local/bin/waitstate")),
+            "pre-rebrand hooks must still be owned"
+        );
         assert!(!binary_name_matches(Path::new("/usr/bin/claude")));
-        assert!(!binary_name_matches(Path::new("/opt/waitstate2")));
+        assert!(!binary_name_matches(Path::new("/opt/mvp2")));
     }
 }

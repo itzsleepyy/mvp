@@ -1,8 +1,8 @@
 [package]
-name = "waitstate"
+name = "mvp"
 version = "0.1.0"
 edition = "2024"
-description = "A competitive terminal arcade for the time between prompts"
+description = "Most Valued Programmer — a competitive terminal arcade for the time between prompts"
 license = "MIT"
 repository = "https://github.com/itzsleepyy/waitstate"
 

@@ -9,7 +9,7 @@
 
 use crate::agent::event::AgentEvent;
 
-/// The coding agents WaitState can listen to.
+/// The coding agents MVP can listen to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum AgentKind {
     ClaudeCode,
@@ -118,7 +118,7 @@ impl AgentStatus {
     }
 }
 
-/// Everything WaitState knows about one connected agent.
+/// Everything MVP knows about one connected agent.
 #[derive(Debug, Clone, Copy)]
 pub struct AgentState {
     pub status: AgentStatus,

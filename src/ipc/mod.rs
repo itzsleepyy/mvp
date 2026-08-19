@@ -1,4 +1,4 @@
-//! Local-only IPC between a running WaitState instance and short-lived
+//! Local-only IPC between a running MVP instance and short-lived
 //! clients such as Claude Code hook commands.
 //!
 //! Design (chosen over Unix sockets/Tokio):

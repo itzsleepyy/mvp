@@ -5,7 +5,7 @@
 //! nothing about individual agents — provider-specific details stay inside
 //! each adapter module (`claude`, `codex`, `gemini`, `opencode`).
 //!
-//! Privacy principle: WaitState receives lifecycle events only. It never
+//! Privacy principle: MVP receives lifecycle events only. It never
 //! sees prompts, tool inputs, source code or agent output.
 
 pub mod claude;
@@ -19,3 +19,10 @@ pub mod status;
 
 pub use event::AgentEvent;
 pub use status::{AgentDisplay, AgentKind, AgentState, AgentStatus};
+
+/// True when an executable name is one MVP owns hooks with. Accepts the
+/// pre-rebrand `waitstate` names too, so hooks installed by the old binary
+/// are still recognized (and upgraded or removed) cleanly.
+pub fn owned_binary_name(name: &str) -> bool {
+    matches!(name, "mvp" | "mvp.exe" | "waitstate" | "waitstate.exe")
+}

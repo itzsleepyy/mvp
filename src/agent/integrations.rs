@@ -14,11 +14,11 @@ use crate::ipc;
 /// Structured integration state for one provider.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProviderStatus {
-    /// No WaitState-owned pieces found.
+    /// No MVP-owned pieces found.
     NotInstalled,
     /// Everything installed and up to date.
     Current,
-    /// WaitState pieces exist but are missing/stale; `detail` explains.
+    /// MVP pieces exist but are missing/stale; `detail` explains.
     Outdated(String),
     /// The provider configuration cannot be read; `detail` explains.
     Broken(String),
@@ -26,10 +26,10 @@ pub enum ProviderStatus {
 
 impl ProviderStatus {
     /// The last-column label for the overview table.
-    pub fn overall(&self, waitstate_running: bool) -> String {
+    pub fn overall(&self, mvp_running: bool) -> String {
         match self {
-            Self::Current if waitstate_running => "ready".to_string(),
-            Self::Current => "WaitState not running".to_string(),
+            Self::Current if mvp_running => "ready".to_string(),
+            Self::Current => "MVP not running".to_string(),
             Self::Outdated(_) => "outdated".to_string(),
             Self::Broken(_) => "broken".to_string(),
             Self::NotInstalled => String::new(),
@@ -97,9 +97,9 @@ pub fn providers() -> [&'static Provider; 4] {
 }
 
 /// Prints the overview table: one row per provider with its integration
-/// state and whether it is ready to drive WaitState right now.
+/// state and whether it is ready to drive MVP right now.
 pub fn run_overview() {
-    println!("WaitState integrations");
+    println!("MVP integrations");
     println!();
     let running = ipc::client::running();
     for provider in providers() {
@@ -114,10 +114,10 @@ pub fn run_overview() {
     println!();
     println!("Detected agents: {}", detected_names().join(", "));
     println!();
-    println!("Install:  waitstate <agent> install     (e.g. waitstate codex install)");
-    println!("Overview: waitstate integrations");
-    println!("All at once: waitstate integrations install [--all]");
-    println!("Fix partial installs: waitstate integrations repair");
+    println!("Install:  mvp <agent> install     (e.g. mvp codex install)");
+    println!("Overview: mvp integrations");
+    println!("All at once: mvp integrations install [--all]");
+    println!("Fix partial installs: mvp integrations repair");
 }
 
 /// Installs integrations for detected agents (or every agent with `all`).
@@ -142,7 +142,7 @@ pub fn run_install(all: bool) {
     }
 }
 
-/// Repairs missing or outdated WaitState-owned pieces for providers that
+/// Repairs missing or outdated MVP-owned pieces for providers that
 /// have any. Install is idempotent, so repair = reinstall for those.
 pub fn run_repair() {
     for provider in providers() {
@@ -205,7 +205,7 @@ mod tests {
 
     #[test]
     fn command_in_dirs_finds_an_executable() {
-        let dir = std::env::temp_dir().join(format!("waitstate_path_{}_exec", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("mvp_path_{}_exec", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("codex");
@@ -231,8 +231,7 @@ mod tests {
 
     #[test]
     fn command_in_dirs_rejects_non_executable_files() {
-        let dir =
-            std::env::temp_dir().join(format!("waitstate_path_{}_noexec", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("mvp_path_{}_noexec", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("gemini");
@@ -245,10 +244,7 @@ mod tests {
     #[test]
     fn provider_status_labels_are_stable() {
         assert_eq!(ProviderStatus::Current.overall(true), "ready");
-        assert_eq!(
-            ProviderStatus::Current.overall(false),
-            "WaitState not running"
-        );
+        assert_eq!(ProviderStatus::Current.overall(false), "MVP not running");
         assert_eq!(ProviderStatus::NotInstalled.overall(false), "");
         assert_eq!(
             ProviderStatus::Outdated("2/6 hooks".into()).overall(true),

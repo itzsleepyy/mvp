@@ -1,4 +1,4 @@
-//! Safe merging of WaitState hooks into the Codex user hooks file.
+//! Safe merging of MVP hooks into the Codex user hooks file.
 //!
 //! Codex discovers hooks next to its config layers; the dedicated
 //! `~/.codex/hooks.json` file is chosen here because merging into it never
@@ -63,7 +63,7 @@ impl CodexConfig {
         })
     }
 
-    /// Merges the WaitState hook set into the file. Returns the number of
+    /// Merges the MVP hook set into the file. Returns the number of
     /// changes made (0 when already installed). Existing hooks and all
     /// other content are preserved.
     pub fn install_hooks(&mut self, binary: &Path) -> usize {
@@ -71,18 +71,18 @@ impl CodexConfig {
             &hook_specs(),
             &binary.display().to_string(),
             codex_handler,
-            is_waitstate_for,
+            is_mvp_for,
         )
     }
 
-    /// Removes every WaitState-owned hook. Returns the number removed.
+    /// Removes every MVP-owned hook. Returns the number removed.
     pub fn uninstall_hooks(&mut self) -> usize {
-        self.inner.uninstall(is_waitstate)
+        self.inner.uninstall(is_mvp)
     }
 
-    /// True when all hook events have an up-to-date WaitState hook.
+    /// True when all hook events have an up-to-date MVP hook.
     pub fn hook_status(&self) -> (usize, usize) {
-        self.inner.status(&hook_specs(), is_waitstate_for)
+        self.inner.status(&hook_specs(), is_mvp_for)
     }
 
     /// Writes the file back, creating a timestamped backup of the previous
@@ -108,22 +108,22 @@ fn codex_handler(binary: &str, event: AgentEvent) -> Value {
     })
 }
 
-/// True for any WaitState hook handler in a Codex file, whatever event it
-/// sends. Ownership is detected by the executable name (`waitstate`) plus
-/// the `hook codex` bridge arguments, so a moved binary is still
+/// True for any MVP hook handler in a Codex file, whatever event it
+/// sends. Ownership is detected by the executable name (`mvp`, plus the
+/// pre-rebrand `waitstate` so old hooks can still be upgraded or removed)
+/// and the `hook codex` bridge arguments, so a moved binary is still
 /// recognised.
-fn is_waitstate(handler: &Value) -> bool {
+fn is_mvp(handler: &Value) -> bool {
     let Some(command) = handler.get("command").and_then(Value::as_str) else {
         return false;
     };
     let binary_name = command_binary_name(first_token(command));
-    let name_ok = matches!(binary_name, "waitstate" | "waitstate.exe");
-    name_ok && command.contains("hook codex")
+    crate::agent::owned_binary_name(binary_name) && command.contains("hook codex")
 }
 
-/// True for a WaitState hook handler sending `event`.
-fn is_waitstate_for(handler: &Value, event: AgentEvent) -> bool {
-    is_waitstate(handler)
+/// True for a MVP hook handler sending `event`.
+fn is_mvp_for(handler: &Value, event: AgentEvent) -> bool {
+    is_mvp(handler)
         && handler
             .get("command")
             .and_then(Value::as_str)
@@ -152,13 +152,13 @@ fn first_token(command: &str) -> &str {
 mod tests {
     use super::*;
 
-    const BINARY_A: &str = "/opt/waitstate";
-    const BINARY_B: &str = "/usr/local/bin/waitstate";
+    const BINARY_A: &str = "/opt/mvp";
+    const BINARY_B: &str = "/usr/local/bin/mvp";
 
     fn temp_config(name: &str, content: &str) -> PathBuf {
         let mut path = std::env::temp_dir();
         path.push(format!(
-            "waitstate_codex_test_{}_{}/hooks.json",
+            "mvp_codex_test_{}_{}/hooks.json",
             std::process::id(),
             name
         ));
@@ -192,17 +192,14 @@ mod tests {
         assert_eq!(hooks.len(), 6);
         let handler = &hooks["PermissionRequest"][0]["hooks"][0];
         assert_eq!(handler["type"], "command");
-        assert_eq!(
-            handler["command"],
-            "'/opt/waitstate' hook codex needs-input"
-        );
+        assert_eq!(handler["command"], "'/opt/mvp' hook codex needs-input");
         assert_eq!(handler["timeout"], 2);
         // Verified against real Codex: async hooks never run in exec
         // sessions, so the handler must stay synchronous.
         assert!(handler.get("async").is_none());
         // Stop expects JSON on stdout when it exits 0: the bridge prints {}.
         let stop = &hooks["Stop"][0]["hooks"][0];
-        assert_eq!(stop["command"], "'/opt/waitstate' hook codex completed");
+        assert_eq!(stop["command"], "'/opt/mvp' hook codex completed");
     }
 
     #[test]
@@ -270,7 +267,7 @@ mod tests {
         let handler = &raw["hooks"]["Stop"][0]["hooks"][0];
         assert_eq!(
             handler["command"],
-            "'/usr/local/bin/waitstate' hook codex completed"
+            "'/usr/local/bin/mvp' hook codex completed"
         );
         let session_start = raw["hooks"]["SessionStart"].as_array().unwrap();
         assert_eq!(session_start[0]["hooks"].as_array().unwrap().len(), 1);
@@ -279,7 +276,7 @@ mod tests {
     #[test]
     fn install_updates_handlers_whose_shape_changed() {
         // Regression: the up-to-date check must compare the whole handler,
-        // so a hook installed by an older WaitState (e.g. with async) is
+        // so a hook installed by an older MVP (e.g. with async) is
         // upgraded, not silently kept.
         let path = temp_config("shape", "");
         let mut config = CodexConfig::load(&path).unwrap();
@@ -291,7 +288,7 @@ mod tests {
             .as_array_mut()
             .unwrap();
         for handler in handlers {
-            handler["async"] = Value::Bool(true); // old WaitState shape
+            handler["async"] = Value::Bool(true); // old MVP shape
         }
         std::fs::write(&path, serde_json::to_string_pretty(&raw).unwrap()).unwrap();
 
@@ -327,7 +324,7 @@ mod tests {
     }
 
     #[test]
-    fn uninstall_removes_only_waitstate_hooks() {
+    fn uninstall_removes_only_mvp_hooks() {
         let path = temp_config(
             "uninstall",
             r#"{
@@ -352,7 +349,7 @@ mod tests {
                                 },
                                 {
                                     "type": "command",
-                                    "command": "'/opt/waitstate' hook codex completed",
+                                    "command": "'/opt/mvp' hook codex completed",
                                     "async": true
                                 }
                             ]
@@ -404,7 +401,7 @@ mod tests {
                             "hooks": [
                                 {
                                     "type": "command",
-                                    "command": "'C:\\Program Files\\WaitState\\waitstate.exe' hook codex completed",
+                                    "command": "'C:\\Program Files\\MVP\\waitstate.exe' hook codex completed",
                                     "async": true
                                 }
                             ]
@@ -432,7 +429,7 @@ mod tests {
                                 },
                                 {
                                     "type": "command",
-                                    "command": "'/opt/waitstate' hook gemini completed"
+                                    "command": "'/opt/mvp' hook gemini completed"
                                 }
                             ]
                         }
@@ -456,7 +453,7 @@ mod tests {
                             "hooks": [
                                 {
                                     "type": "command",
-                                    "command": "'/opt/waitstate' hook codex completed",
+                                    "command": "'/opt/mvp' hook codex completed",
                                     "async": true
                                 }
                             ]
@@ -504,16 +501,10 @@ mod tests {
 
     #[test]
     fn shell_quoting_handles_spaces_and_quotes() {
-        assert_eq!(shell_quote("/opt/waitstate"), "'/opt/waitstate'");
+        assert_eq!(shell_quote("/opt/mvp"), "'/opt/mvp'");
         assert_eq!(shell_quote("it's here"), "'it'\\''s here'");
-        assert_eq!(
-            first_token("'/opt/waitstate' hook codex working"),
-            "/opt/waitstate"
-        );
-        assert_eq!(
-            first_token("/opt/waitstate hook codex working"),
-            "/opt/waitstate"
-        );
+        assert_eq!(first_token("'/opt/mvp' hook codex working"), "/opt/mvp");
+        assert_eq!(first_token("/opt/mvp hook codex working"), "/opt/mvp");
         assert_eq!(first_token("  \"/x y/z\" a"), "/x y/z");
     }
 }

@@ -825,6 +825,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "mvp"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "crossterm",
+ "directories",
+ "libc",
+ "rand 0.10.2",
+ "ratatui",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "nix"
 version = "0.29.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1714,20 +1728,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6d9b2acfb050df409c972a37d3b8e08cdea3bddb0c09db9d53137e504cfabed0"
 dependencies = [
  "utf8parse",
-]
-
-[[package]]
-name = "waitstate"
-version = "0.1.0"
-dependencies = [
- "clap",
- "crossterm",
- "directories",
- "libc",
- "rand 0.10.2",
- "ratatui",
- "serde",
- "serde_json",
 ]
 
 [[package]]

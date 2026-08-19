@@ -27,8 +27,8 @@
 //! - `session.error` is deliberately unmapped (an errored session is not a
 //!   clean completion).
 //! - Multiple OpenCode sessions are treated as one logical agent stream.
-//! - The plugin spawns the waitstate binary per event via `Bun.spawn`
-//!   (fire-and-forget); if WaitState is not running the spawn fails
+//! - The plugin spawns the mvp binary per event via `Bun.spawn`
+//!   (fire-and-forget); if MVP is not running the spawn fails
 //!   silently.
 
 mod plugin;
@@ -39,17 +39,18 @@ use crate::agent::integrations::ProviderStatus;
 use crate::ipc;
 
 pub use plugin::{
-    PLUGIN_FILE_NAME, PLUGIN_VERSION, installed_version, is_waitstate_owned, plugin_dir,
-    plugin_source,
+    PLUGIN_FILE_NAME, PLUGIN_VERSION, installed_version, is_mvp_owned, plugin_dir, plugin_source,
 };
 
 fn current_binary() -> Result<std::path::PathBuf, String> {
-    std::env::current_exe().map_err(|e| format!("cannot resolve the waitstate binary path: {e}"))
+    std::env::current_exe().map_err(|e| format!("cannot resolve the mvp binary path: {e}"))
 }
 
-/// Installs the WaitState plugin into OpenCode's global plugin directory.
-/// Idempotent; older WaitState plugin files are upgraded in place. A file
-/// without our marker is never overwritten.
+/// Installs the MVP plugin into OpenCode's global plugin directory.
+/// Idempotent; older MVP plugin files are upgraded in place. A file
+/// without our marker is never overwritten. A pre-rebrand plugin file
+/// (`waitstate.js`) is removed so the old and new plugin cannot both
+/// report events.
 pub fn install() -> Result<(), String> {
     install_with_binary(&current_binary()?)
 }
@@ -62,17 +63,25 @@ fn install_into(dir: &Path, binary: &Path) -> Result<(), String> {
     let path = dir.join(PLUGIN_FILE_NAME);
     std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
 
+    let legacy = dir.join(plugin::LEGACY_PLUGIN_FILE_NAME);
+    if legacy.exists()
+        && let Ok(content) = std::fs::read_to_string(&legacy)
+        && is_mvp_owned(&content)
+    {
+        let _ = std::fs::remove_file(&legacy);
+    }
+
     let source = plugin_source(binary);
     match std::fs::read_to_string(&path) {
         Ok(existing) => {
-            if !is_waitstate_owned(&existing) {
+            if !is_mvp_owned(&existing) {
                 return Err(format!(
-                    "{} exists but is not WaitState-owned; remove it manually first",
+                    "{} exists but is not MVP-owned; remove it manually first",
                     path.display()
                 ));
             }
             if existing == source {
-                println!("WaitState plugin is already installed and up to date.");
+                println!("MVP plugin is already installed and up to date.");
                 println!("Plugin: {}", path.display());
                 return Ok(());
             }
@@ -87,7 +96,7 @@ fn install_into(dir: &Path, binary: &Path) -> Result<(), String> {
             })?;
             std::fs::write(&path, source)
                 .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
-            println!("WaitState plugin updated (v{version} → v{PLUGIN_VERSION}).");
+            println!("MVP plugin updated (v{version} → v{PLUGIN_VERSION}).");
             println!("Plugin: {}", path.display());
             println!("A backup of the previous plugin was saved next to it.");
             Ok(())
@@ -95,7 +104,7 @@ fn install_into(dir: &Path, binary: &Path) -> Result<(), String> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             std::fs::write(&path, source)
                 .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
-            println!("WaitState plugin installed.");
+            println!("MVP plugin installed.");
             println!("Plugin: {}", path.display());
             Ok(())
         }
@@ -103,7 +112,7 @@ fn install_into(dir: &Path, binary: &Path) -> Result<(), String> {
     }
 }
 
-/// Removes the WaitState plugin file — and only that file.
+/// Removes the MVP plugin file — and only that file.
 pub fn uninstall() -> Result<(), String> {
     uninstall_from(&plugin_dir())
 }
@@ -113,20 +122,17 @@ fn uninstall_from(dir: &Path) -> Result<(), String> {
     let content = match std::fs::read_to_string(&path) {
         Ok(content) => content,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            println!("No WaitState plugin found — nothing to remove.");
+            println!("No MVP plugin found — nothing to remove.");
             return Ok(());
         }
         Err(e) => return Err(format!("cannot read {}: {e}", path.display())),
     };
-    if !is_waitstate_owned(&content) {
-        println!(
-            "{} is not a WaitState plugin — left untouched.",
-            path.display()
-        );
+    if !is_mvp_owned(&content) {
+        println!("{} is not a MVP plugin — left untouched.", path.display());
         return Ok(());
     }
     std::fs::remove_file(&path).map_err(|e| format!("cannot remove {}: {e}", path.display()))?;
-    println!("Removed WaitState plugin.");
+    println!("Removed MVP plugin.");
     println!("Plugin: {}", path.display());
     Ok(())
 }
@@ -151,7 +157,7 @@ fn status_state_at(dir: &Path) -> ProviderStatus {
             Some(version) => ProviderStatus::Outdated(format!(
                 "plugin v{version} found, v{PLUGIN_VERSION} expected"
             )),
-            None => ProviderStatus::Broken(format!("{} is not a WaitState plugin", path.display())),
+            None => ProviderStatus::Broken(format!("{} is not a MVP plugin", path.display())),
         },
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => ProviderStatus::NotInstalled,
         Err(e) => ProviderStatus::Broken(format!("cannot read {}: {e}", path.display())),
@@ -177,21 +183,21 @@ fn print_provider_status(plugin: &ProviderStatus) {
     };
     println!("Plugin:     {plugin_line}");
 
-    let waitstate_running = ipc::client::running();
+    let mvp_running = ipc::client::running();
     println!(
-        "WaitState:  {}",
-        if waitstate_running {
+        "MVP:     {}",
+        if mvp_running {
             "running"
         } else {
             "not running"
         }
     );
-    if waitstate_running {
+    if mvp_running {
         println!("IPC:        connected");
     }
 
     println!();
-    let overall = match (plugin, waitstate_running) {
+    let overall = match (plugin, mvp_running) {
         (ProviderStatus::Current, true) => "ready",
         (ProviderStatus::Current, false) => "plugin installed",
         (ProviderStatus::Outdated(_), _) => "outdated",
@@ -205,14 +211,11 @@ fn print_provider_status(plugin: &ProviderStatus) {
 mod tests {
     use super::*;
 
-    const BINARY_A: &str = "/opt/waitstate";
+    const BINARY_A: &str = "/opt/mvp";
 
     fn temp_plugin_dir(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "waitstate_opencode_test_{}_{}",
-            std::process::id(),
-            name
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("mvp_opencode_test_{}_{}", std::process::id(), name));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -225,8 +228,41 @@ mod tests {
         let path = dir.join(PLUGIN_FILE_NAME);
         assert!(path.exists());
         let content = std::fs::read_to_string(&path).unwrap();
-        assert!(is_waitstate_owned(&content));
+        assert!(is_mvp_owned(&content));
         assert!(content.contains("Bun.spawn"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn install_removes_a_legacy_pre_rebrand_plugin_file() {
+        let dir = temp_plugin_dir("legacy");
+        let legacy = dir.join(plugin::LEGACY_PLUGIN_FILE_NAME);
+        std::fs::write(&legacy, "// WAITSTATE_OPENCODE_PLUGIN v1\nlegacy content").unwrap();
+
+        install_into(&dir, Path::new(BINARY_A)).unwrap();
+        assert!(
+            !legacy.exists(),
+            "the pre-rebrand plugin must be removed on install"
+        );
+        assert!(dir.join(PLUGIN_FILE_NAME).exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn install_keeps_a_foreign_legacy_file() {
+        let dir = temp_plugin_dir("foreignlegacy");
+        let legacy = dir.join(plugin::LEGACY_PLUGIN_FILE_NAME);
+        let foreign = "export const Mine = async () => ({})";
+        std::fs::write(&legacy, foreign).unwrap();
+
+        install_into(&dir, Path::new(BINARY_A)).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&legacy).unwrap(),
+            foreign,
+            "foreign files are never touched"
+        );
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -250,8 +286,8 @@ mod tests {
 
         // An older version is upgraded with a backup.
         let older = first.replace(
-            format!("// WAITSTATE_OPENCODE_PLUGIN v{PLUGIN_VERSION}").as_str(),
-            "// WAITSTATE_OPENCODE_PLUGIN v0",
+            format!("// MVP_OPENCODE_PLUGIN v{PLUGIN_VERSION}").as_str(),
+            "// MVP_OPENCODE_PLUGIN v0",
         );
         std::fs::write(&path, &older).unwrap();
         install_into(&dir, Path::new(BINARY_A)).unwrap();
@@ -275,7 +311,7 @@ mod tests {
         std::fs::write(&path, foreign).unwrap();
 
         let err = install_into(&dir, Path::new(BINARY_A)).unwrap_err();
-        assert!(err.contains("not WaitState-owned"));
+        assert!(err.contains("not MVP-owned"));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), foreign);
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -327,8 +363,8 @@ mod tests {
 
         let path = dir.join(PLUGIN_FILE_NAME);
         let older = std::fs::read_to_string(&path).unwrap().replace(
-            format!("// WAITSTATE_OPENCODE_PLUGIN v{PLUGIN_VERSION}").as_str(),
-            "// WAITSTATE_OPENCODE_PLUGIN v0",
+            format!("// MVP_OPENCODE_PLUGIN v{PLUGIN_VERSION}").as_str(),
+            "// MVP_OPENCODE_PLUGIN v0",
         );
         std::fs::write(&path, older).unwrap();
         assert!(matches!(status_state_at(&dir), ProviderStatus::Outdated(_)));

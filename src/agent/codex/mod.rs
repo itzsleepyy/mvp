@@ -16,7 +16,7 @@
 //! | `Stop`               | (all)   | `Completed` |
 //! | `SessionEnd`         | (all)   | `Stopped`   |
 //!
-//! Every hook runs `waitstate hook codex <event>` — a shell command that
+//! Every hook runs `mvp hook codex <event>` — a shell command that
 //! prints `{}` (valid, decision-free JSON) and exits 0. Codex therefore
 //! treats every hook as observational: `PermissionRequest` never decides
 //! (the normal approval flow continues) and `Stop` never asks to continue
@@ -26,7 +26,7 @@
 //!
 //! Known limitations:
 //! - Codex requires non-managed hooks to be reviewed and trusted via
-//!   `/hooks` before they run the first time; `waitstate codex status`
+//!   `/hooks` before they run the first time; `mvp codex status`
 //!   reminds about this.
 //! - `SessionEnd` only fires when the conversation closes, is archived, or
 //!   has been idle for 30 minutes — not at the end of each turn. `Stop` is
@@ -94,10 +94,10 @@ pub const HOOKS: &[HookEntry] = &[
 ];
 
 fn current_binary() -> Result<std::path::PathBuf, String> {
-    std::env::current_exe().map_err(|e| format!("cannot resolve the waitstate binary path: {e}"))
+    std::env::current_exe().map_err(|e| format!("cannot resolve the mvp binary path: {e}"))
 }
 
-/// Installs the WaitState hooks into the user's Codex hooks file.
+/// Installs the MVP hooks into the user's Codex hooks file.
 /// Idempotent; never modifies the file if it cannot be parsed.
 pub fn install() -> Result<(), String> {
     install_with_binary(&current_binary()?)
@@ -109,33 +109,30 @@ fn install_with_binary(binary: &Path) -> Result<(), String> {
     let changes = config.install_hooks(binary);
 
     if changes == 0 {
-        println!("WaitState hooks are already installed and up to date.");
+        println!("MVP hooks are already installed and up to date.");
         println!("Config: {}", path.display());
         println!("Remember: review and trust the hooks in Codex with /hooks.");
         return Ok(());
     }
     config.save()?;
-    println!(
-        "WaitState hooks installed ({changes} change{})",
-        plural(changes)
-    );
+    println!("MVP hooks installed ({changes} change{})", plural(changes));
     println!("Config: {}", path.display());
     println!("A backup of the previous settings was saved next to it.");
     println!("Remember: review and trust the hooks in Codex with /hooks.");
     Ok(())
 }
 
-/// Removes only WaitState-owned hooks. Idempotent.
+/// Removes only MVP-owned hooks. Idempotent.
 pub fn uninstall() -> Result<(), String> {
     let path = config_path();
     let mut config = CodexConfig::load(&path)?;
     let removed = config.uninstall_hooks();
     if removed == 0 {
-        println!("No WaitState hooks found — nothing to remove.");
+        println!("No MVP hooks found — nothing to remove.");
         return Ok(());
     }
     config.save()?;
-    println!("Removed {removed} WaitState hook{}.", plural(removed));
+    println!("Removed {removed} MVP hook{}.", plural(removed));
     println!("Config: {}", path.display());
     println!("A backup of the previous settings was saved next to it.");
     Ok(())
@@ -163,7 +160,7 @@ pub fn status_state() -> ProviderStatus {
     }
 }
 
-/// True when any WaitState pieces exist but are missing/stale.
+/// True when any MVP pieces exist but are missing/stale.
 pub fn needs_repair() -> bool {
     matches!(status_state(), ProviderStatus::Outdated(_))
 }
@@ -189,21 +186,21 @@ fn print_provider_status(hooks: &ProviderStatus) {
         println!("Trust:      review with /hooks in Codex");
     }
 
-    let waitstate_running = ipc::client::running();
+    let mvp_running = ipc::client::running();
     println!(
-        "WaitState:  {}",
-        if waitstate_running {
+        "MVP:     {}",
+        if mvp_running {
             "running"
         } else {
             "not running"
         }
     );
-    if waitstate_running {
+    if mvp_running {
         println!("IPC:        connected");
     }
 
     println!();
-    let overall = match (hooks, waitstate_running) {
+    let overall = match (hooks, mvp_running) {
         (ProviderStatus::Current, true) => "ready",
         (ProviderStatus::Current, false) => "hooks configured",
         (ProviderStatus::Outdated(_), _) => "outdated",

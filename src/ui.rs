@@ -32,6 +32,7 @@ pub fn render(frame: &mut Frame, app: &App) {
     match app.state {
         AppState::Menu => render_menu(frame, app),
         AppState::GameMenu => render_game_menu(frame, app),
+        AppState::NamePrompt => render_name_prompt(frame, app),
         AppState::Playing
         | AppState::PausedManual
         | AppState::PausedAgent(_)
@@ -42,14 +43,14 @@ pub fn render(frame: &mut Frame, app: &App) {
 // ---- menu ----------------------------------------------------------------
 
 const LOGO: [&str; 6] = [
-    "██╗    ██╗ █████╗ ██╗████████╗███████╗████████╗ █████╗ ████████╗███████╗",
-    "██║    ██║██╔══██╗██║╚══██╔══╝██╔════╝╚══██╔══╝██╔══██╗╚══██╔══╝██╔════╝",
-    "██║ █╗ ██║███████║██║   ██║   ███████╗   ██║   ███████║   ██║   █████╗",
-    "██║███╗██║██╔══██║██║   ██║   ╚════██║   ██║   ██╔══██║   ██║   ██╔══╝",
-    "╚███╔███╔╝██║  ██║██║   ██║   ███████║   ██║   ██║  ██║   ██║   ███████╗",
-    " ╚══╝╚══╝ ╚═╝  ╚═╝╚═╝   ╚═╝   ╚══════╝   ╚═╝   ╚═╝  ╚═╝   ╚═╝   ╚══════╝",
+    "███╗   ███╗  ██╗   ██╗  ██████╗",
+    "████╗ ████║  ██║   ██║  ██╔══██╗",
+    "██╔████╔██║  ██║   ██║  ██████╔╝",
+    "██║╚██╔╝██║  ╚██╗ ██╔╝  ██╔═══╝",
+    "██║ ╚═╝ ██║   ╚████╔╝   ██║",
+    "╚═╝     ╚═╝    ╚═══╝    ╚═╝",
 ];
-const LOGO_WIDTH: usize = 74;
+const LOGO_WIDTH: usize = 25;
 
 fn render_menu(frame: &mut Frame, app: &App) {
     let area = frame.area();
@@ -58,18 +59,33 @@ fn render_menu(frame: &mut Frame, app: &App) {
     let magenta = Style::new().fg(Color::Magenta);
     let dim = Style::new().fg(Color::DarkGray);
     let green = Style::new().fg(Color::Green).add_modifier(Modifier::BOLD);
+    let gold = Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD);
 
     let mut lines: Vec<Line<'_>> = Vec::new();
     if wide {
         lines.extend(LOGO.iter().map(|row| Line::styled(*row, magenta)));
     } else {
-        lines.push(Line::styled(
-            "W A I T S T A T E",
-            magenta.add_modifier(Modifier::BOLD),
-        ));
+        lines.push(Line::styled("M V P", magenta.add_modifier(Modifier::BOLD)));
     }
     lines.push(Line::from(""));
-    lines.push(Line::styled("ARCADE FOR THE AGENTIC ERA", dim));
+    lines.push(Line::styled("MOST VALUED PROGRAMMER", dim));
+    lines.push(Line::from(""));
+    if let Some(mvp) = app.daily_mvp() {
+        lines.push(Line::styled(
+            format!(
+                "MVP OF THE DAY  {}  —  {}  ({})",
+                mvp.name,
+                format_score(mvp.score),
+                mvp.game_kind().title()
+            ),
+            gold,
+        ));
+        lines.push(Line::from(""));
+    }
+    lines.push(Line::styled(
+        format!("PLAYING AS {}    [N] CHANGE NAME", app.player_name()),
+        dim,
+    ));
     lines.push(Line::from(""));
     if let Some(status_line) = agent_status_line(app) {
         lines.push(status_line);
@@ -85,6 +101,40 @@ fn render_menu(frame: &mut Frame, app: &App) {
             dim,
         ));
     }
+
+    let total = lines.len() as u16;
+    let vertical = Layout::vertical([
+        Constraint::Length(area.height.saturating_sub(total) / 2),
+        Constraint::Length(total),
+        Constraint::Min(0),
+    ])
+    .split(area);
+    let paragraph = Paragraph::new(lines).alignment(Alignment::Center);
+    frame.render_widget(paragraph, vertical[1]);
+}
+
+// ---- name prompt ---------------------------------------------------------
+
+fn render_name_prompt(frame: &mut Frame, app: &App) {
+    let area = frame.area();
+
+    let magenta = Style::new().fg(Color::Magenta);
+    let dim = Style::new().fg(Color::DarkGray);
+    let white = Style::new().fg(Color::White).add_modifier(Modifier::BOLD);
+
+    let mut lines: Vec<Line<'_>> = Vec::new();
+    lines.push(Line::styled(
+        "WHO IS THE MVP?",
+        magenta.add_modifier(Modifier::BOLD),
+    ));
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::raw("> "),
+        Span::styled(format!("{}▌", app.name_buffer()), white),
+    ]));
+    lines.push(Line::from(""));
+    lines.push(Line::styled("YOUR NAME GOES ON TODAY'S MVP BOARD", dim));
+    lines.push(Line::styled("[ENTER] OK    [ESC] SKIP", dim));
 
     let total = lines.len() as u16;
     let vertical = Layout::vertical([
@@ -188,7 +238,7 @@ fn render_stack_jump(frame: &mut Frame, app: &App, game: &StackJump) {
         AppState::PausedManual => render_paused(frame, area, app),
         AppState::PausedAgent(reason) => render_agent_paused(frame, area, app, reason),
         AppState::GameOver => render_game_over(frame, area, app),
-        AppState::Playing | AppState::Menu | AppState::GameMenu => {}
+        AppState::Playing | AppState::Menu | AppState::GameMenu | AppState::NamePrompt => {}
     }
 }
 
@@ -232,7 +282,7 @@ fn render_twenty_one(frame: &mut Frame, app: &App, game: &TwentyOne) {
         AppState::PausedManual => render_paused(frame, area, app),
         AppState::PausedAgent(reason) => render_agent_paused(frame, area, app, reason),
         AppState::GameOver => render_game_over(frame, area, app),
-        AppState::Playing | AppState::Menu | AppState::GameMenu => {}
+        AppState::Playing | AppState::Menu | AppState::GameMenu | AppState::NamePrompt => {}
     }
 }
 
@@ -757,6 +807,12 @@ fn render_game_over(frame: &mut Frame, area: Rect, app: &App) {
             Style::new().fg(Color::Green).add_modifier(Modifier::BOLD),
         ));
     }
+    if app.mvp_just_set() {
+        lines.push(Line::styled(
+            "MVP OF THE DAY!",
+            Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        ));
+    }
     if let Some(status) = agent_status_span(app) {
         lines.push(Line::from(vec![Span::raw("   "), status, Span::raw("   ")]));
     }
@@ -805,7 +861,7 @@ fn render_too_small(frame: &mut Frame, app: &App) {
             Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
         ),
         Line::from(""),
-        Line::from("WaitState requires at least 60×20."),
+        Line::from("MVP requires at least 60×20."),
         Line::from(format!("Current size: {cols}×{rows}")),
         Line::from("Resize the terminal to keep playing."),
     ];
@@ -897,19 +953,31 @@ mod tests {
     use super::*;
     use crate::agent::AgentKind;
     use crate::config::HighScoreStore;
+    use crate::event::AppInput;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::buffer::Buffer;
 
     fn test_store(name: &str) -> HighScoreStore {
-        let mut path = std::env::temp_dir();
-        path.push(format!("waitstate_ui_test_{}_{}", std::process::id(), name));
-        let _ = std::fs::remove_file(&path);
-        HighScoreStore::load(path)
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "mvp_ui_test_{}_{}_{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed),
+            name
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        HighScoreStore::load(dir.join("highscore.json"))
     }
 
     fn app_at(width: u16, height: u16) -> App {
-        let mut app = App::new(test_store("ui.json"));
+        app_with_store(test_store("ui.json"), width, height)
+    }
+
+    fn app_with_store(store: HighScoreStore, width: u16, height: u16) -> App {
+        let mut app = App::new(store);
         app.set_terminal_size(width, height);
         app
     }
@@ -955,17 +1023,76 @@ mod tests {
     fn menu_render_shows_logo_and_controls() {
         let app = app_at(100, 30);
         let text = all_text(&render_buffer(&app, 100, 30));
-        assert!(text.contains("ARCADE FOR THE AGENTIC ERA"));
+        assert!(text.contains("MOST VALUED PROGRAMMER"));
         assert!(text.contains("PLAY"));
         assert!(text.contains("QUIT"));
     }
 
     #[test]
     fn menu_render_degrades_to_plain_title_when_narrow() {
-        let app = app_at(70, 30);
-        let text = all_text(&render_buffer(&app, 70, 30));
-        assert!(text.contains("W A I T S T A T E"));
+        let app = app_at(100, 30);
+        // The app gates menus at 60×20, so exercise the narrow branch by
+        // drawing the menu directly into a tiny frame.
+        let backend = TestBackend::new(10, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render_menu(frame, &app)).unwrap();
+        let text = all_text(terminal.backend().buffer());
+        assert!(text.contains("M V P"));
         assert!(text.contains("PLAY"));
+    }
+
+    #[test]
+    fn menu_render_shows_the_player_name_and_mvp_of_the_day() {
+        let mut app = app_with_store(test_store("mvpline.json"), 100, 30);
+        app.open_name_prompt();
+        app.handle_input(AppInput::Text('A'));
+        app.handle_input(AppInput::Text('l'));
+        app.handle_input(AppInput::Text('e'));
+        app.handle_input(AppInput::Text('x'));
+        app.handle_input(AppInput::Confirm);
+        assert_eq!(app.player_name(), "Alex");
+
+        let text = all_text(&render_buffer(&app, 100, 30));
+        assert!(text.contains("PLAYING AS Alex"), "menu must show the name");
+        assert!(
+            text.contains("CHANGE NAME"),
+            "menu must hint the rename key"
+        );
+
+        app.start_game();
+        {
+            use crate::game::obstacle::{Obstacle, ObstacleKind};
+            app.game_mut()
+                .as_mut()
+                .unwrap()
+                .as_stack_jump_mut()
+                .unwrap()
+                .world
+                .obstacles
+                .push(Obstacle::new(0.5, ObstacleKind::Small));
+        }
+        app.tick(std::time::Duration::from_millis(16));
+        assert_eq!(app.state, AppState::GameOver);
+        let text = all_text(&render_buffer(&app, 100, 30));
+        assert!(text.contains("MVP OF THE DAY!"), "game over must crown");
+
+        app.back_to_menu();
+        let text = all_text(&render_buffer(&app, 100, 30));
+        assert!(
+            text.contains("MVP OF THE DAY") && text.contains("Alex"),
+            "menu must show today's MVP"
+        );
+    }
+
+    #[test]
+    fn name_prompt_render_shows_the_input_line() {
+        let mut app = app_at(100, 30);
+        app.open_name_prompt();
+        app.handle_input(AppInput::Text('A'));
+        let text = all_text(&render_buffer(&app, 100, 30));
+        assert!(text.contains("WHO IS THE MVP?"));
+        assert!(text.contains("A▌"), "typed name must render with cursor");
+        assert!(text.contains("SKIP"));
     }
 
     #[test]

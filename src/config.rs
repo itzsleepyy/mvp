@@ -1,12 +1,21 @@
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
 use crate::game::GameKind;
 
 const FILE_NAME: &str = "highscore.json";
+const MVP_FILE_NAME: &str = "mvp_day.json";
+/// Name used before the rebrand to MVP; its config directory is migrated
+/// from on first run so existing scores survive.
+const LEGACY_APP_NAME: &str = "WaitState";
+const APP_NAME: &str = "MVP";
+/// Name assigned to a player who skips the name prompt.
+pub const ANONYMOUS: &str = "Anonymous";
+/// Longest accepted player name.
+const NAME_LIMIT: usize = 24;
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct HighScoreData {
@@ -17,6 +26,40 @@ struct HighScoreData {
     /// Best score per game kind, keyed by [`GameKind::id`].
     #[serde(default)]
     games: BTreeMap<String, u64>,
+    /// The player's chosen name; empty until the first-run prompt.
+    #[serde(default)]
+    player_name: String,
+}
+
+/// Who owns the best score on a given day, across all games. This is the
+/// "MVP of the day": whoever beat everyone else's best that day.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DailyMvp {
+    /// The local day (YYYY-MM-DD) this MVP was set for.
+    pub date: String,
+    /// The player's name.
+    pub name: String,
+    /// Their best score that day, across every game.
+    pub score: u64,
+    /// [`GameKind::id`] of the game the score was set in.
+    pub game: String,
+}
+
+impl DailyMvp {
+    /// The game the MVP score was set in.
+    pub fn game_kind(&self) -> GameKind {
+        GameKind::ALL
+            .iter()
+            .find(|k| k.id() == self.game)
+            .copied()
+            .unwrap_or(GameKind::StackJump)
+    }
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct DailyMvpData {
+    #[serde(default)]
+    mvp: Option<DailyMvp>,
 }
 
 /// Local high-score storage. All filesystem problems — missing file, empty
@@ -26,24 +69,50 @@ struct HighScoreData {
 pub struct HighScoreStore {
     path: PathBuf,
     data: HighScoreData,
+    mvp_path: PathBuf,
+    mvp_data: DailyMvpData,
 }
 
 impl HighScoreStore {
     /// Locates the platform-appropriate config directory and loads the high
-    /// scores from it, if any.
+    /// scores and the daily MVP from it, migrating any pre-rebrand data.
     pub fn discover() -> Self {
-        let path = platform_path().unwrap_or_else(|| PathBuf::from(FILE_NAME));
-        Self::load(path)
+        let Some(dirs) = directories::ProjectDirs::from("", "", APP_NAME) else {
+            let fallback = PathBuf::from(FILE_NAME);
+            let store = Self::load(fallback);
+            return store;
+        };
+        let path = dirs.config_dir().join(FILE_NAME);
+        let mvp_path = dirs.config_dir().join(MVP_FILE_NAME);
+        if let Some(legacy) = directories::ProjectDirs::from("", "", LEGACY_APP_NAME) {
+            migrate_from_legacy(&path, &legacy.config_dir().join(FILE_NAME));
+            migrate_from_legacy(&mvp_path, &legacy.config_dir().join(MVP_FILE_NAME));
+        }
+        Self::load_at(path, mvp_path)
     }
 
-    /// Loads the high scores from `path`. Any failure yields zero scores.
+    /// Loads the high scores and daily MVP from files next to `path`.
     pub fn load(path: impl Into<PathBuf>) -> Self {
         let path = path.into();
+        let mvp_path = path.with_file_name(MVP_FILE_NAME);
+        Self::load_at(path, mvp_path)
+    }
+
+    fn load_at(path: PathBuf, mvp_path: PathBuf) -> Self {
         let data = fs::read_to_string(&path)
             .ok()
             .and_then(|text| serde_json::from_str::<HighScoreData>(&text).ok())
             .unwrap_or_default();
-        Self { path, data }
+        let mvp_data = fs::read_to_string(&mvp_path)
+            .ok()
+            .and_then(|text| serde_json::from_str::<DailyMvpData>(&text).ok())
+            .unwrap_or_default();
+        Self {
+            path,
+            data,
+            mvp_path,
+            mvp_data,
+        }
     }
 
     /// The best score across every game.
@@ -72,20 +141,128 @@ impl HighScoreStore {
         true
     }
 
+    // ---- player name ------------------------------------------------------
+
+    /// The stored player name. Empty until the first-run prompt is
+    /// answered.
+    #[cfg(test)]
+    pub fn player_name_raw(&self) -> &str {
+        &self.data.player_name
+    }
+
+    /// True once the player answered the first-run name prompt.
+    pub fn has_player_name(&self) -> bool {
+        !self.data.player_name.is_empty()
+    }
+
+    /// The name shown in the UI; never empty.
+    pub fn player_name(&self) -> &str {
+        if self.data.player_name.is_empty() {
+            ANONYMOUS
+        } else {
+            &self.data.player_name
+        }
+    }
+
+    /// Stores the player's chosen name (trimmed, capped). An empty name
+    /// clears the stored name; the UI then falls back to [`ANONYMOUS`].
+    pub fn set_player_name(&mut self, name: &str) {
+        let name = name.trim();
+        let name = if name.is_empty() {
+            String::new()
+        } else {
+            name.chars().take(NAME_LIMIT).collect()
+        };
+        if self.data.player_name == name {
+            return;
+        }
+        self.data.player_name = name;
+        self.save();
+    }
+
+    // ---- daily MVP --------------------------------------------------------
+
+    /// Today's MVP of the day, if a score has been set yet.
+    pub fn daily_mvp(&self) -> Option<&DailyMvp> {
+        self.mvp_data.mvp.as_ref()
+    }
+
+    /// Records `score` as today's MVP if it beats the current one for
+    /// today. A new day always replaces yesterday's MVP. Returns `true`
+    /// when this score became the MVP of the day.
+    pub fn record_daily_mvp(&mut self, name: &str, kind: GameKind, score: u64) -> bool {
+        let today = today_key();
+        let current = self.mvp_data.mvp.as_ref();
+        if current.is_some_and(|m| m.date == today && m.score >= score) {
+            return false;
+        }
+        self.mvp_data.mvp = Some(DailyMvp {
+            date: today,
+            name: name.to_string(),
+            score,
+            game: kind.id().to_string(),
+        });
+        self.save_mvp();
+        true
+    }
+
     fn save(&self) {
         let Ok(data) = serde_json::to_string_pretty(&self.data) else {
             return;
         };
-        if let Some(parent) = self.path.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-        let _ = fs::write(&self.path, data);
+        write_file(&self.path, &data);
+    }
+
+    fn save_mvp(&self) {
+        let Ok(data) = serde_json::to_string_pretty(&self.mvp_data) else {
+            return;
+        };
+        write_file(&self.mvp_path, &data);
     }
 }
 
+fn write_file(path: &Path, data: &str) {
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let _ = fs::write(path, data);
+}
+
+#[cfg(test)]
 fn platform_path() -> Option<PathBuf> {
-    directories::ProjectDirs::from("", "", "WaitState")
-        .map(|dirs| dirs.config_dir().join(FILE_NAME))
+    directories::ProjectDirs::from("", "", APP_NAME).map(|dirs| dirs.config_dir().join(FILE_NAME))
+}
+
+/// Copies a pre-rebrand config file into the MVP directory when the new
+/// location does not exist yet. Never overwrites.
+fn migrate_from_legacy(new: &Path, legacy: &Path) {
+    if new.exists() || !legacy.exists() {
+        return;
+    }
+    if let Some(parent) = new.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let _ = fs::copy(legacy, new);
+}
+
+/// The local day as YYYY-MM-DD, from the civil-date algorithm (Howard
+/// Hinnant's `civil_from_days`). No external date dependency needed.
+fn today_key() -> String {
+    let days = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64 / 86_400)
+        .unwrap_or(0);
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if month <= 2 { year + 1 } else { year };
+    format!("{year:04}-{month:02}-{day:02}")
 }
 
 #[cfg(test)]
@@ -94,13 +271,21 @@ mod tests {
     use std::path::Path;
 
     fn temp_path(name: &str) -> PathBuf {
-        let mut path = std::env::temp_dir();
-        path.push(format!("waitstate_test_{}_{}", std::process::id(), name));
-        path
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "mvp_test_{}_{}_{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed),
+            name
+        ));
+        let _ = fs::create_dir_all(&dir);
+        dir.join(FILE_NAME)
     }
 
     fn clean(path: &Path) {
         let _ = fs::remove_file(path);
+        let _ = fs::remove_file(path.with_file_name(MVP_FILE_NAME));
     }
 
     #[test]
@@ -111,6 +296,7 @@ mod tests {
         assert_eq!(store.high_score(), 0);
         assert_eq!(store.best_score(GameKind::StackJump), 0);
         assert_eq!(store.best_score(GameKind::TwentyOne), 0);
+        assert_eq!(store.daily_mvp(), None);
     }
 
     #[test]
@@ -137,6 +323,7 @@ mod tests {
         let store = HighScoreStore::load(&path);
         assert_eq!(store.high_score(), 4_820);
         assert_eq!(store.best_score(GameKind::StackJump), 0);
+        assert!(!store.has_player_name());
         clean(&path);
     }
 
@@ -185,5 +372,194 @@ mod tests {
         assert!(!store.record(GameKind::StackJump, 0));
         assert!(!store.record(GameKind::TwentyOne, 0));
         clean(&path);
+    }
+
+    // ---- player name ------------------------------------------------------
+
+    #[test]
+    fn player_name_starts_anonymous_and_is_editable() {
+        let path = temp_path("name.json");
+        clean(&path);
+        let mut store = HighScoreStore::load(&path);
+        assert!(!store.has_player_name());
+        assert_eq!(store.player_name(), ANONYMOUS);
+
+        store.set_player_name("  Alex  ");
+        assert!(store.has_player_name());
+        assert_eq!(store.player_name(), "Alex");
+        assert_eq!(store.player_name_raw(), "Alex");
+
+        let reloaded = HighScoreStore::load(&path);
+        assert_eq!(reloaded.player_name(), "Alex");
+        clean(&path);
+    }
+
+    #[test]
+    fn empty_or_whitespace_name_becomes_anonymous() {
+        let path = temp_path("anon.json");
+        clean(&path);
+        let mut store = HighScoreStore::load(&path);
+        store.set_player_name("   ");
+        assert!(!store.has_player_name());
+        assert_eq!(store.player_name(), ANONYMOUS);
+        clean(&path);
+    }
+
+    #[test]
+    fn names_are_capped_at_the_name_limit() {
+        let path = temp_path("longname.json");
+        clean(&path);
+        let mut store = HighScoreStore::load(&path);
+        let long = "a".repeat(100);
+        store.set_player_name(&long);
+        assert_eq!(store.player_name().len(), NAME_LIMIT);
+        clean(&path);
+    }
+
+    // ---- daily MVP ---------------------------------------------------------
+
+    #[test]
+    fn daily_mvp_round_trips_through_disk() {
+        let path = temp_path("mvp.json");
+        clean(&path);
+
+        let mut store = HighScoreStore::load(&path);
+        assert!(store.record_daily_mvp("Alex", GameKind::StackJump, 4_820));
+        let mvp = store.daily_mvp().expect("mvp set");
+        assert_eq!(mvp.name, "Alex");
+        assert_eq!(mvp.score, 4_820);
+        assert_eq!(mvp.game_kind(), GameKind::StackJump);
+        assert_eq!(mvp.date, today_key());
+
+        let reloaded = HighScoreStore::load(&path);
+        assert_eq!(reloaded.daily_mvp(), store.daily_mvp());
+        clean(&path);
+    }
+
+    #[test]
+    fn daily_mvp_only_replaced_by_a_better_score_same_day() {
+        let path = temp_path("mvpbeat.json");
+        clean(&path);
+
+        let mut store = HighScoreStore::load(&path);
+        store.record_daily_mvp("Alex", GameKind::StackJump, 1_000);
+        assert!(
+            !store.record_daily_mvp("Sam", GameKind::TwentyOne, 900),
+            "lower score must not dethrone the MVP"
+        );
+        assert_eq!(store.daily_mvp().unwrap().name, "Alex");
+
+        assert!(
+            store.record_daily_mvp("Sam", GameKind::TwentyOne, 1_100),
+            "higher score must crown a new MVP"
+        );
+        assert_eq!(store.daily_mvp().unwrap().name, "Sam");
+        assert_eq!(store.daily_mvp().unwrap().game_kind(), GameKind::TwentyOne);
+        clean(&path);
+    }
+
+    #[test]
+    fn yesterday_mvp_is_replaced_today() {
+        let path = temp_path("mvprollover.json");
+        clean(&path);
+
+        let mut store = HighScoreStore::load(&path);
+        store.mvp_data.mvp = Some(DailyMvp {
+            date: "2000-01-01".to_string(),
+            name: "Old Guard".to_string(),
+            score: 99_999,
+            game: "stack-jump".to_string(),
+        });
+        assert!(
+            store.record_daily_mvp("Fresh", GameKind::StackJump, 10),
+            "a new day always starts fresh"
+        );
+        assert_eq!(store.daily_mvp().unwrap().name, "Fresh");
+        assert_eq!(store.daily_mvp().unwrap().date, today_key());
+        clean(&path);
+    }
+
+    #[test]
+    fn zero_score_can_be_today_mvp_but_not_dethrone() {
+        let path = temp_path("mvpzero.json");
+        clean(&path);
+
+        let mut store = HighScoreStore::load(&path);
+        assert!(store.record_daily_mvp("Alex", GameKind::StackJump, 0));
+        assert!(!store.record_daily_mvp("Sam", GameKind::StackJump, 0));
+        assert_eq!(store.daily_mvp().unwrap().name, "Alex");
+        clean(&path);
+    }
+
+    // ---- legacy migration --------------------------------------------------
+
+    #[test]
+    fn legacy_directory_is_migrated_on_first_run() {
+        let legacy_dir =
+            std::env::temp_dir().join(format!("mvp_test_{}_legacy_dir", std::process::id()));
+        let new_dir = std::env::temp_dir().join(format!("mvp_test_{}_new_dir", std::process::id()));
+        let _ = fs::remove_dir_all(&legacy_dir);
+        let _ = fs::remove_dir_all(&new_dir);
+        fs::create_dir_all(&legacy_dir).unwrap();
+        fs::write(legacy_dir.join(FILE_NAME), r#"{"high_score": 1234}"#).unwrap();
+        fs::write(
+            legacy_dir.join(MVP_FILE_NAME),
+            r#"{"mvp": {"date": "2026-08-19", "name": "Old", "score": 100, "game": "stack-jump"}}"#,
+        )
+        .unwrap();
+
+        migrate_from_legacy(&new_dir.join(FILE_NAME), &legacy_dir.join(FILE_NAME));
+        migrate_from_legacy(
+            &new_dir.join(MVP_FILE_NAME),
+            &legacy_dir.join(MVP_FILE_NAME),
+        );
+
+        let store = HighScoreStore::load_at(new_dir.join(FILE_NAME), new_dir.join(MVP_FILE_NAME));
+        assert_eq!(store.high_score(), 1_234, "high scores must migrate");
+        assert_eq!(
+            store.daily_mvp().unwrap().name,
+            "Old",
+            "daily MVP must migrate"
+        );
+
+        let _ = fs::remove_dir_all(&legacy_dir);
+        let _ = fs::remove_dir_all(&new_dir);
+    }
+
+    #[test]
+    fn migration_never_overwrites_existing_new_files() {
+        let legacy = temp_path("miglegacy.json");
+        let new = temp_path("mignew.json");
+        clean(&new);
+        fs::write(&legacy, r#"{"high_score": 1}"#).unwrap();
+        fs::write(&new, r#"{"high_score": 999}"#).unwrap();
+
+        migrate_from_legacy(&new, &legacy);
+        assert_eq!(HighScoreStore::load(&new).high_score(), 999);
+        clean(&new);
+        clean(&legacy);
+    }
+
+    // ---- date --------------------------------------------------------------
+
+    #[test]
+    fn today_key_is_formatted_yyyymmdd() {
+        let key = today_key();
+        let parts: Vec<&str> = key.split('-').collect();
+        assert_eq!(parts.len(), 3);
+        assert_eq!(parts[0].len(), 4);
+        assert_eq!(parts[1].len(), 2);
+        assert_eq!(parts[2].len(), 2);
+    }
+
+    #[test]
+    fn platform_path_uses_the_mvp_directory() {
+        let path = platform_path().expect("platform path");
+        let display = path.display().to_string();
+        assert!(
+            display.contains("MVP") || display.contains("mvp"),
+            "expected the MVP config directory, got {display}"
+        );
+        assert!(!display.contains("WaitState"));
     }
 }

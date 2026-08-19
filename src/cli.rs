@@ -1,25 +1,25 @@
 //! Command-line interface.
 //!
 //! ```text
-//! waitstate                              run the game (default)
-//! waitstate play                         run the game
-//! waitstate --agent codex                run the game, show Codex status
-//! waitstate --agent auto                 run the game, follow live events
-//! waitstate agent-event [AGENT] EVENT    send one lifecycle event (used by
+//! mvp                              run the game (default)
+//! mvp play                         run the game
+//! mvp --agent codex                run the game, show Codex status
+//! mvp --agent auto                 run the game, follow live events
+//! mvp agent-event [AGENT] EVENT    send one lifecycle event (used by
 //!                                        agent hooks; never launches a TUI,
 //!                                        never prints to stdout)
-//! waitstate hook AGENT EVENT             bridge for Codex/Gemini hooks:
+//! mvp hook AGENT EVENT             bridge for Codex/Gemini hooks:
 //!                                        sends the event and prints "{}"
 //!                                        (their protocols require JSON
 //!                                        output; hidden from help)
-//! waitstate claude install|uninstall|status
-//! waitstate codex install|uninstall|status
-//! waitstate gemini install|uninstall|status
-//! waitstate opencode install|uninstall|status
-//! waitstate integrations                 show all integrations at once
-//! waitstate integrations install         install for detected agents
-//! waitstate integrations install --all   install every supported agent
-//! waitstate integrations repair          fix missing/outdated pieces
+//! mvp claude install|uninstall|status
+//! mvp codex install|uninstall|status
+//! mvp gemini install|uninstall|status
+//! mvp opencode install|uninstall|status
+//! mvp integrations                 show all integrations at once
+//! mvp integrations install         install for detected agents
+//! mvp integrations install --all   install every supported agent
+//! mvp integrations repair          fix missing/outdated pieces
 //! ```
 
 use clap::{Parser, Subcommand};
@@ -29,9 +29,9 @@ use crate::agent::status::{AgentDisplay, AgentKind};
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "waitstate",
+    name = "mvp",
     version,
-    about = "A competitive terminal arcade for the time between prompts",
+    about = "Most Valued Programmer — a competitive terminal arcade for the time between prompts",
     long_about = None
 )]
 pub struct Cli {
@@ -54,7 +54,7 @@ pub struct Cli {
 pub enum Command {
     /// Run the game (the default command)
     Play,
-    /// Send a lifecycle event to the running WaitState instance
+    /// Send a lifecycle event to the running MVP instance
     AgentEvent {
         /// The lifecycle event, optionally prefixed by the agent:
         /// `agent-event working` or `agent-event codex working`
@@ -100,9 +100,9 @@ pub enum Command {
 
 #[derive(Debug, Subcommand)]
 pub enum ProviderCommand {
-    /// Merge WaitState hooks/plugin into the agent configuration (idempotent)
+    /// Merge MVP hooks/plugin into the agent configuration (idempotent)
     Install,
-    /// Remove only WaitState-owned hooks/plugin files
+    /// Remove only MVP-owned hooks/plugin files
     Uninstall,
     /// Show integration status
     Status,
@@ -116,7 +116,7 @@ pub enum IntegrationsCommand {
         #[arg(long)]
         all: bool,
     },
-    /// Repair missing or outdated WaitState integration pieces
+    /// Repair missing or outdated MVP integration pieces
     Repair,
 }
 
@@ -178,7 +178,7 @@ mod tests {
 
     #[test]
     fn bare_invocation_runs_the_game() {
-        let cli = parse(&["waitstate"]);
+        let cli = parse(&["mvp"]);
         assert!(cli.agent.is_none());
         assert!(cli.command.is_none());
         assert!(!cli.no_auto_resume);
@@ -186,13 +186,13 @@ mod tests {
 
     #[test]
     fn no_auto_resume_flag_parses() {
-        let cli = parse(&["waitstate", "--no-auto-resume"]);
+        let cli = parse(&["mvp", "--no-auto-resume"]);
         assert!(cli.no_auto_resume);
     }
 
     #[test]
     fn play_command_is_explicit() {
-        let cli = parse(&["waitstate", "play"]);
+        let cli = parse(&["mvp", "play"]);
         assert!(matches!(cli.command, Some(Command::Play)));
     }
 
@@ -205,7 +205,7 @@ mod tests {
             ("completed", AgentEvent::Completed),
             ("stopped", AgentEvent::Stopped),
         ] {
-            let cli = parse(&["waitstate", "agent-event", name]);
+            let cli = parse(&["mvp", "agent-event", name]);
             match cli.command {
                 Some(Command::AgentEvent { args }) => {
                     assert_eq!(
@@ -226,7 +226,7 @@ mod tests {
             ("gemini", AgentKind::GeminiCli),
             ("opencode", AgentKind::OpenCode),
         ] {
-            let cli = parse(&["waitstate", "agent-event", name, "working"]);
+            let cli = parse(&["mvp", "agent-event", name, "working"]);
             match cli.command {
                 Some(Command::AgentEvent { args }) => {
                     assert_eq!(
@@ -247,12 +247,12 @@ mod tests {
         assert!(parse_agent_event_args(&[]).is_err());
         assert!(parse_agent_event_args(&["a".into(), "b".into(), "c".into()]).is_err());
         // Clap itself still requires at least one argument.
-        assert!(Cli::try_parse_from(["waitstate", "agent-event"]).is_err());
+        assert!(Cli::try_parse_from(["mvp", "agent-event"]).is_err());
     }
 
     #[test]
     fn hook_command_parses_agent_and_event() {
-        let cli = parse(&["waitstate", "hook", "codex", "working"]);
+        let cli = parse(&["mvp", "hook", "codex", "working"]);
         match cli.command {
             Some(Command::Hook { agent, event }) => {
                 assert_eq!(agent.into_agent_kind(), AgentKind::Codex);
@@ -264,27 +264,27 @@ mod tests {
 
     #[test]
     fn agent_flag_parses_every_agent_and_auto() {
-        let cli = parse(&["waitstate", "--agent", "claude"]);
+        let cli = parse(&["mvp", "--agent", "claude"]);
         assert_eq!(cli.agent.unwrap().into_agent_kind(), AgentKind::ClaudeCode);
-        let cli = parse(&["waitstate", "--agent", "codex"]);
+        let cli = parse(&["mvp", "--agent", "codex"]);
         assert_eq!(cli.agent.unwrap().into_agent_kind(), AgentKind::Codex);
-        let cli = parse(&["waitstate", "--agent", "gemini"]);
+        let cli = parse(&["mvp", "--agent", "gemini"]);
         assert_eq!(cli.agent.unwrap().into_agent_kind(), AgentKind::GeminiCli);
-        let cli = parse(&["waitstate", "--agent", "opencode"]);
+        let cli = parse(&["mvp", "--agent", "opencode"]);
         assert_eq!(cli.agent.unwrap().into_agent_kind(), AgentKind::OpenCode);
-        let cli = parse(&["waitstate", "--agent", "auto"]);
+        let cli = parse(&["mvp", "--agent", "auto"]);
         assert!(matches!(
             cli.agent.unwrap().into_agent_display(),
             AgentDisplay::Auto
         ));
-        assert!(Cli::try_parse_from(["waitstate", "--agent", "warp"]).is_err());
+        assert!(Cli::try_parse_from(["mvp", "--agent", "warp"]).is_err());
     }
 
     #[test]
     fn provider_subcommands_parse() {
         for name in ["claude", "codex", "gemini", "opencode"] {
             for verb in ["install", "uninstall", "status"] {
-                let cli = parse(&["waitstate", name, verb]);
+                let cli = parse(&["mvp", name, verb]);
                 let ok = match &cli.command {
                     Some(Command::Claude { command }) => matches!(
                         command,
@@ -315,31 +315,31 @@ mod tests {
                 assert!(ok, "{name} {verb} should parse");
             }
         }
-        assert!(Cli::try_parse_from(["waitstate", "codex", "explode"]).is_err());
+        assert!(Cli::try_parse_from(["mvp", "codex", "explode"]).is_err());
     }
 
     #[test]
     fn integrations_commands_parse() {
-        let cli = parse(&["waitstate", "integrations"]);
+        let cli = parse(&["mvp", "integrations"]);
         assert!(matches!(
             cli.command,
             Some(Command::Integrations { command: None })
         ));
-        let cli = parse(&["waitstate", "integrations", "install"]);
+        let cli = parse(&["mvp", "integrations", "install"]);
         match cli.command {
             Some(Command::Integrations {
                 command: Some(IntegrationsCommand::Install { all }),
             }) => assert!(!all),
             other => panic!("unexpected: {other:?}"),
         }
-        let cli = parse(&["waitstate", "integrations", "install", "--all"]);
+        let cli = parse(&["mvp", "integrations", "install", "--all"]);
         match cli.command {
             Some(Command::Integrations {
                 command: Some(IntegrationsCommand::Install { all }),
             }) => assert!(all),
             other => panic!("unexpected: {other:?}"),
         }
-        let cli = parse(&["waitstate", "integrations", "repair"]);
+        let cli = parse(&["mvp", "integrations", "repair"]);
         assert!(matches!(
             cli.command,
             Some(Command::Integrations {

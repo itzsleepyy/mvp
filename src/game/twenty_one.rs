@@ -384,13 +384,21 @@ impl TwentyOne {
         self.chips = chips;
     }
 
-    /// Test hook: replaces both hands with known cards and reopens the
-    /// player turn, so flow tests never depend on shuffle order.
+    /// Test hook: replaces both hands with known cards, resets the run to
+    /// its fresh state and reopens the player turn, so flow tests never
+    /// depend on shuffle order (an opening-deal natural would otherwise
+    /// settle a round before the test acts).
     #[cfg(test)]
     pub(crate) fn debug_set_hands(&mut self, player: Vec<Card>, dealer: Vec<Card>) {
         self.player = player;
         self.dealer = dealer;
+        self.chips = STARTING_CHIPS;
+        self.peak_chips = STARTING_CHIPS;
         self.outcome = None;
+        self.wins = 0;
+        self.losses = 0;
+        self.pushes = 0;
+        self.game_over = false;
         self.phase = Phase::PlayerTurn;
     }
 }

@@ -1,16 +1,18 @@
-# WaitState
+# MVP — Most Valued Programmer
 
-> A competitive terminal arcade for the time between prompts. Play quick games while your coding agent works, compete on leaderboards, and jump straight back in when it needs you.
+> A competitive terminal arcade for the time between prompts. Play quick games while your coding agent works, chase the **MVP of the day**, and jump straight back in when it needs you.
 
-**Status: early development.** WaitState currently ships two playable games — *Stack Jump* and *Twenty One* — with local scoring and local coding-agent integrations for Claude Code, Codex, Gemini CLI and OpenCode. Everything else on the roadmap is still to come.
+**Status: early development.** MVP ships two playable games — *Stack Jump* and *Twenty One* — with local per-game scoring, a daily **MVP of the day** board, and local coding-agent integrations for Claude Code, Codex, Gemini CLI and OpenCode. Everything else on the roadmap is still to come.
 
-## What is WaitState?
+## What is MVP?
 
-Coding agents (Claude Code, Codex, Gemini CLI, OpenCode) routinely work autonomously for seconds or minutes at a time. WaitState turns that idle time into a lightweight terminal arcade:
+Coding agents (Claude Code, Codex, Gemini CLI, OpenCode) routinely work autonomously for seconds or minutes at a time. MVP turns that idle time into a lightweight terminal arcade:
 
 ```text
-start agent → agent works → play WaitState → agent needs you → game pauses → you get back to work
+start agent → agent works → play MVP → agent needs you → game pauses → you get back to work
 ```
+
+**Most Valued Programmer** is the prize: your best score on any game that day is the day's *MVP of the day*, displayed on the menu for everyone sharing the machine to see. The scoring board resets every day, so there's always a fresh crown to take — whoever is programming most deserves the title.
 
 Games are designed for very short bursts — simple controls, instant restart, no tutorials.
 
@@ -19,12 +21,24 @@ Games are designed for very short bursts — simple controls, instant restart, n
 - [x] Terminal application foundation
 - [x] Two playable games (Stack Jump, Twenty One)
 - [x] Per-game local high-score persistence
+- [x] Daily MVP-of-the-day board with player names
 - [x] Claude Code integration
 - [x] Codex integration
 - [x] Gemini CLI integration
 - [x] OpenCode integration
 - [ ] GitHub authentication
 - [ ] Global leaderboards
+
+## MVP of the day
+
+On the first launch MVP asks who you are; the name is saved (change it any time with `N` on the main menu). Every finished run competes for today's board:
+
+- The **best single score** of the day — across every game — crowns the MVP of the day.
+- The current holder appears on the main menu: `MVP OF THE DAY  Alex  —  4,820  (STACK JUMP)`.
+- A run that dethrones the holder flashes **MVP OF THE DAY!** on the game-over panel.
+- At midnight the board resets: a new day, a new title to claim.
+
+The board lives locally (per machine). Player names and scores never leave your computer until global leaderboards ship.
 
 ## Games
 
@@ -48,13 +62,14 @@ Blackjack against the dealer — you versus the house, no splitting or doubling 
 
 | Key | Action |
 | --- | --- |
-| `ENTER` | Open the game menu / start the selected game / resume an agent-paused run |
+| `ENTER` | Open the game menu / start the selected game / resume an agent-paused run / confirm your name |
 | `↑` / `↓` | Select a game (game menu) |
 | `SPACE` / `↑` | Jump (Stack Jump) |
 | `H` / `S` | Hit / stand (Twenty One) |
+| `N` | Change your name (main menu) |
 | `P` | Pause / resume (manual) |
 | `R` | Restart after game over |
-| `ESC` | Back to menu |
+| `ESC` | Back to menu / skip the name prompt |
 | `Q` / `CTRL+C` | Quit |
 
 ## Installation
@@ -64,8 +79,11 @@ Requires a recent stable Rust toolchain.
 ```bash
 git clone https://github.com/itzsleepyy/waitstate
 cd waitstate
-cargo run --release
+cargo install --path .
+mvp
 ```
+
+Pre-rebrand `WaitState` installs upgrade in place: high scores are migrated into the new `MVP` config directory on first run, and hooks installed by the old binary are still recognised and upgraded.
 
 ## Supported coding agents
 
@@ -91,25 +109,25 @@ Agent adapters ◄─┼─ Gemini hooks
                       IPC
                        │
                        ▼
-                WaitState App
+                    MVP App
 ```
 
 ### Setup
 
 ```bash
-waitstate integrations          # overview of every integration
-waitstate claude install        # merge hooks into Claude settings (idempotent, backs up first)
-waitstate codex install         # merge hooks into ~/.codex/hooks.json
-waitstate gemini install        # merge hooks into ~/.gemini/settings.json
-waitstate opencode install      # install the WaitState plugin into OpenCode
+mvp integrations          # overview of every integration
+mvp claude install        # merge hooks into Claude settings (idempotent, backs up first)
+mvp codex install         # merge hooks into ~/.codex/hooks.json
+mvp gemini install        # merge hooks into ~/.gemini/settings.json
+mvp opencode install      # install the MVP plugin into OpenCode
 ```
 
 Or all at once:
 
 ```bash
-waitstate integrations install         # install for detected agents only
-waitstate integrations install --all   # install every supported agent
-waitstate integrations repair          # fix missing/outdated pieces
+mvp integrations install         # install for detected agents only
+mvp integrations install --all   # install every supported agent
+mvp integrations repair          # fix missing/outdated pieces
 ```
 
 Each provider also has `status` and `uninstall` subcommands. Every installer:
@@ -119,15 +137,15 @@ Each provider also has `status` and `uninstall` subcommands. Every installer:
 - refuses to modify unparseable or foreign files
 - creates a timestamped backup before writing
 - is idempotent and safe to run any number of times
-- removes only WaitState-owned pieces on uninstall
+- removes only MVP-owned pieces on uninstall
 
-Then just run `waitstate` and use your agent as usual. `waitstate --agent codex` pins the status indicator to one agent; `waitstate --agent auto` follows whichever agent most recently emitted an event. With no flag, the indicator appears once the first event arrives.
+Then just run `mvp` and use your agent as usual. `mvp --agent codex` pins the status indicator to one agent; `mvp --agent auto` follows whichever agent most recently emitted an event. With no flag, the indicator appears once the first event arrives.
 
 A small status indicator (`Codex • Working`, or `2 agents • Working`) appears in the menu, HUD, pause overlays and game-over panel. A manual pause (`P`) is never overridden by agent events, and a run paused because an agent *finished* is only resumed by you (`ENTER`). Agent-paused runs freeze score, player position, obstacles and difficulty exactly where they were.
 
 ### Attention model (multiple agents)
 
-Multiple agents can work at once. WaitState keeps per-agent state and derives one aggregate status:
+Multiple agents can work at once. MVP keeps per-agent state and derives one aggregate status:
 
 ```text
 if ANY active agent NeedsInput → pause ("CODEX NEEDS YOU", "2 AGENTS NEED YOU", …)
@@ -140,9 +158,9 @@ A completion pause is sticky for the completing agent: that agent working again 
 
 ### How it works
 
-Each adapter's official lifecycle mechanism runs a WaitState bridge command that never blocks the agent (exit 0, bounded timeout, no output — or exactly `{}` where the hook protocol requires JSON). Events travel over a local-only loopback IPC socket (per-user, token-protected, protocol-versioned, agent-identified) to the running game, where the generic event model drives the state machine:
+Each adapter's official lifecycle mechanism runs an MVP bridge command that never blocks the agent (exit 0, bounded timeout, no output — or exactly `{}` where the hook protocol requires JSON). Events travel over a local-only loopback IPC socket (per-user, token-protected, protocol-versioned, agent-identified) to the running game, where the generic event model drives the state machine:
 
-| WaitState event | Claude Code | Codex | Gemini CLI | OpenCode |
+| MVP event | Claude Code | Codex | Gemini CLI | OpenCode |
 | --- | --- | --- | --- | --- |
 | `Started` | `SessionStart` | `SessionStart` | `SessionStart` | `session.created` |
 | `Working` | `UserPromptSubmit`, `PostToolUse` | `UserPromptSubmit`, `PostToolUse` | `BeforeAgent`, `BeforeTool`, `AfterTool` | `session.status` busy, `tool.execute.before/after`, `permission.replied` |
@@ -161,10 +179,10 @@ Claude Code:
 
 Codex:
 
-- Non-managed hooks must be reviewed and trusted via `/hooks` in Codex before they run the first time (`waitstate codex status` reminds you). Untrusted hooks run sandboxed, where the WaitState binary may be unreachable.
+- Non-managed hooks must be reviewed and trusted via `/hooks` in Codex before they run the first time (`mvp codex status` reminds you). Untrusted hooks run sandboxed, where the MVP binary may be unreachable.
 - Hooks are synchronous (verified: `async` hooks never run in `codex exec` sessions) — the bridge is one bounded local TCP connect, so the agent loop is not held up.
 - `SessionEnd` fires when the conversation closes, is archived, or idles for 30 minutes — `Stop` is the primary completion signal.
-- A failed *other* hook in the same group (e.g. a stale third-party hook) shows a hook-failure warning in Codex but does not affect WaitState's hooks.
+- A failed *other* hook in the same group (e.g. a stale third-party hook) shows a hook-failure warning in Codex but does not affect MVP's hooks.
 
 Gemini CLI:
 
@@ -174,7 +192,7 @@ Gemini CLI:
 OpenCode:
 
 - `session.error` is deliberately unmapped (an errored session is not a clean completion).
-- The plugin spawns the WaitState binary per event; if WaitState is not running, the spawn fails silently.
+- The plugin spawns the MVP binary per event; if MVP is not running, the spawn fails silently.
 
 All agents:
 
@@ -183,7 +201,7 @@ All agents:
 
 ### Privacy
 
-**WaitState knows when the agent is working, not what you are working on.** It receives lifecycle events only — it never reads your prompts, source code, tool output, repository contents or conversation history. The hook commands and IPC protocol carry nothing but an agent kind and an event name.
+**MVP knows when the agent is working, not what you are working on.** It receives lifecycle events only — it never reads your prompts, source code, tool output, repository contents or conversation history. The hook commands and IPC protocol carry nothing but an agent kind and an event name.
 
 ## Development setup
 
@@ -211,10 +229,12 @@ src/
 │                status/uninstall, integrations overview/install/repair)
 ├── tui.rs       terminal init/restore (raw mode, alternate screen, panic hook)
 ├── event.rs     crossterm events → application inputs
-├── app.rs       application state machine (Menu / GameMenu / Playing /
-│                PausedManual / PausedAgent / GameOver), game selection,
-│                per-agent state and the aggregate attention model
-├── config.rs    platform-aware per-game high-score storage
+├── app.rs       application state machine (Menu / GameMenu / NamePrompt /
+│                Playing / PausedManual / PausedAgent / GameOver), game
+│                selection, the daily-MVP recording, per-agent state and
+│                the aggregate attention model
+├── config.rs    platform-aware per-game high scores, the daily MVP board
+│                and the player name (legacy WaitState dir is migrated)
 ├── ui.rs        Ratatui rendering (menu, HUD, overlays, resize handling)
 ├── agent/       generic agent lifecycle events, status and adapters
 │   ├── event.rs       AgentEvent (started/working/needs-input/completed/stopped)
@@ -255,7 +275,7 @@ Key decisions:
 - **One state machine for all agents**: adapters normalize into `AgentEvent`; per-agent statuses aggregate into one attention decision (`NeedsInput > Working > Completed > Stopped > Idle`).
 - **Obstacle spacing is guaranteed fair**: gaps are rolled as `speed × reaction time + jitter`, so every pattern is physically clearable as speed increases.
 - The event loop is a simple 60 FPS poll loop (crossterm) plus one plain-thread IPC listener — `tokio` was intentionally not introduced: a blocking terminal game loop gains nothing from an async runtime, and short-lived hook clients need nothing more than a channel. It can be revisited for network integrations.
-- High-score storage lives in the platform config directory (e.g. `~/.config/waitstate/`, `~/Library/Application Support/WaitState/`, `%APPDATA%\WaitState\`) and degrades gracefully on any filesystem problem.
+- High-score storage, the daily MVP board and the player name live in the platform config directory (e.g. `~/.config/mvp/`, `~/Library/Application Support/MVP/`, `%APPDATA%\MVP\`) and degrade gracefully on any filesystem problem. The pre-rebrand `WaitState` directory is migrated from on first run.
 
 ## Roadmap
 
@@ -264,6 +284,7 @@ Key decisions:
 [x] Two playable games (Stack Jump, Twenty One)
 [x] Game selection menu
 [x] Local per-game scoring
+[x] Daily MVP-of-the-day board
 [x] Claude Code integration
 [x] Codex integration
 [x] Gemini CLI integration

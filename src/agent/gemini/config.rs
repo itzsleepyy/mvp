@@ -1,13 +1,13 @@
-//! Safe merging of WaitState hooks into the Gemini CLI settings file
+//! Safe merging of MVP hooks into the Gemini CLI settings file
 //! (`~/.gemini/settings.json`).
 //!
 //! Gemini specifics:
-//! - hooks run **synchronously** as part of the agent loop, so the WaitState
+//! - hooks run **synchronously** as part of the agent loop, so the MVP
 //!   bridge must be extremely fast (one local TCP connect, hard timeout)
 //!   and never fail loudly: it always exits 0;
 //! - the "golden rule" of Gemini hooks: stdout may contain only one JSON
 //!   object. The `hook` bridge prints `{}` — valid, decision-free JSON —
-//!   so WaitState can never block, modify, approve or reject anything;
+//!   so MVP can never block, modify, approve or reject anything;
 //! - debug output, if any, goes to stderr only;
 //! - extensions can later bundle the same hook table (the `hooks` section
 //!   of settings.json) without any lifecycle-logic changes.
@@ -56,7 +56,7 @@ impl GeminiConfig {
         })
     }
 
-    /// Merges the WaitState hook set into the settings. Returns the number
+    /// Merges the MVP hook set into the settings. Returns the number
     /// of changes made (0 when already installed). Existing hooks and all
     /// other settings are preserved.
     pub fn install_hooks(&mut self, binary: &Path) -> usize {
@@ -64,18 +64,18 @@ impl GeminiConfig {
             &hook_specs(),
             &binary.display().to_string(),
             gemini_handler,
-            is_waitstate_for,
+            is_mvp_for,
         )
     }
 
-    /// Removes every WaitState-owned hook. Returns the number removed.
+    /// Removes every MVP-owned hook. Returns the number removed.
     pub fn uninstall_hooks(&mut self) -> usize {
-        self.inner.uninstall(is_waitstate)
+        self.inner.uninstall(is_mvp)
     }
 
-    /// True when all hook events have an up-to-date WaitState hook.
+    /// True when all hook events have an up-to-date MVP hook.
     pub fn hook_status(&self) -> (usize, usize) {
-        self.inner.status(&hook_specs(), is_waitstate_for)
+        self.inner.status(&hook_specs(), is_mvp_for)
     }
 
     /// Writes the settings back, creating a timestamped backup of the
@@ -92,28 +92,29 @@ impl GeminiConfig {
 fn gemini_handler(binary: &str, event: AgentEvent) -> Value {
     let command = format!("{} hook gemini {}", shell_quote(binary), event.as_str());
     json!({
-        "name": "waitstate",
+        "name": "mvp",
         "type": "command",
         "command": command,
         "timeout": 2000,
     })
 }
 
-/// True for any WaitState hook handler in a Gemini file, whatever event it
-/// sends. Ownership is detected by the executable name (`waitstate`) plus
-/// the `hook gemini` bridge arguments, so a moved binary is still
+/// True for any MVP hook handler in a Gemini file, whatever event it
+/// sends. Ownership is detected by the executable name (`mvp`, plus the
+/// pre-rebrand `waitstate` so old hooks can still be upgraded or removed)
+/// and the `hook gemini` bridge arguments, so a moved binary is still
 /// recognised.
-fn is_waitstate(handler: &Value) -> bool {
+fn is_mvp(handler: &Value) -> bool {
     let Some(command) = handler.get("command").and_then(Value::as_str) else {
         return false;
     };
     let binary_name = command_binary_name(first_token(command));
-    matches!(binary_name, "waitstate" | "waitstate.exe") && command.contains("hook gemini")
+    crate::agent::owned_binary_name(binary_name) && command.contains("hook gemini")
 }
 
-/// True for a WaitState hook handler sending `event`.
-fn is_waitstate_for(handler: &Value, event: AgentEvent) -> bool {
-    is_waitstate(handler)
+/// True for a MVP hook handler sending `event`.
+fn is_mvp_for(handler: &Value, event: AgentEvent) -> bool {
+    is_mvp(handler)
         && handler
             .get("command")
             .and_then(Value::as_str)
@@ -142,13 +143,13 @@ fn first_token(command: &str) -> &str {
 mod tests {
     use super::*;
 
-    const BINARY_A: &str = "/opt/waitstate";
-    const BINARY_B: &str = "/usr/local/bin/waitstate";
+    const BINARY_A: &str = "/opt/mvp";
+    const BINARY_B: &str = "/usr/local/bin/mvp";
 
     fn temp_config(name: &str, content: &str) -> PathBuf {
         let mut path = std::env::temp_dir();
         path.push(format!(
-            "waitstate_gemini_test_{}_{}/settings.json",
+            "mvp_gemini_test_{}_{}/settings.json",
             std::process::id(),
             name
         ));
@@ -182,17 +183,11 @@ mod tests {
         assert_eq!(hooks.len(), 7);
         let handler = &hooks["Notification"][0]["hooks"][0];
         assert_eq!(handler["type"], "command");
-        assert_eq!(handler["name"], "waitstate");
-        assert_eq!(
-            handler["command"],
-            "'/opt/waitstate' hook gemini needs-input"
-        );
+        assert_eq!(handler["name"], "mvp");
+        assert_eq!(handler["command"], "'/opt/mvp' hook gemini needs-input");
         assert_eq!(handler["timeout"], 2000);
         let before_agent = &hooks["BeforeAgent"][0]["hooks"][0];
-        assert_eq!(
-            before_agent["command"],
-            "'/opt/waitstate' hook gemini working"
-        );
+        assert_eq!(before_agent["command"], "'/opt/mvp' hook gemini working");
     }
 
     #[test]
@@ -227,7 +222,7 @@ mod tests {
         // The user's matcher-scoped group stays untouched; our matcher-less
         // "match all" group is a separate entry.
         let before_tool = raw["hooks"]["BeforeTool"].as_array().unwrap();
-        assert_eq!(before_tool.len(), 2, "user group + WaitState group");
+        assert_eq!(before_tool.len(), 2, "user group + MVP group");
         let user_group = before_tool
             .iter()
             .find(|g| g.get("matcher").and_then(Value::as_str) == Some("run_shell_command"))
@@ -265,7 +260,7 @@ mod tests {
         let handler = &raw["hooks"]["AfterAgent"][0]["hooks"][0];
         assert_eq!(
             handler["command"],
-            "'/usr/local/bin/waitstate' hook gemini completed"
+            "'/usr/local/bin/mvp' hook gemini completed"
         );
         let groups = raw["hooks"]["SessionStart"].as_array().unwrap();
         assert_eq!(groups[0]["hooks"].as_array().unwrap().len(), 1);
@@ -287,7 +282,7 @@ mod tests {
     }
 
     #[test]
-    fn uninstall_removes_only_waitstate_hooks() {
+    fn uninstall_removes_only_mvp_hooks() {
         let path = temp_config(
             "uninstall",
             r#"{
@@ -313,9 +308,9 @@ mod tests {
                                     "command": "/home/user/audit.sh"
                                 },
                                 {
-                                    "name": "waitstate",
+                                    "name": "mvp",
                                     "type": "command",
-                                    "command": "'/opt/waitstate' hook gemini completed",
+                                    "command": "'/opt/mvp' hook gemini completed",
                                     "timeout": 2000
                                 }
                             ]
@@ -363,9 +358,9 @@ mod tests {
                         {
                             "hooks": [
                                 {
-                                    "name": "waitstate",
+                                    "name": "mvp",
                                     "type": "command",
-                                    "command": "'C:\\Program Files\\WaitState\\waitstate.exe' hook gemini stopped"
+                                    "command": "'C:\\Program Files\\MVP\\waitstate.exe' hook gemini stopped"
                                 }
                             ]
                         }
@@ -392,7 +387,7 @@ mod tests {
                                 },
                                 {
                                     "type": "command",
-                                    "command": "'/opt/waitstate' hook codex completed"
+                                    "command": "'/opt/mvp' hook codex completed"
                                 }
                             ]
                         }
@@ -415,9 +410,9 @@ mod tests {
                         {
                             "hooks": [
                                 {
-                                    "name": "waitstate",
+                                    "name": "mvp",
                                     "type": "command",
-                                    "command": "'/opt/waitstate' hook gemini completed"
+                                    "command": "'/opt/mvp' hook gemini completed"
                                 }
                             ]
                         }

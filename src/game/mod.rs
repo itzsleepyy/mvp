@@ -33,7 +33,7 @@ pub enum GameInput {
     Confirm,
 }
 
-/// The games WaitState ships, in menu order.
+/// The games MVP ships, in menu order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GameKind {
     StackJump,
@@ -160,7 +160,7 @@ impl ActiveGame {
     }
 }
 
-/// The first WaitState game: an endless runner where the player hops over
+/// The first MVP game: an endless runner where the player hops over
 /// obstacles while the world scrolls past. Pure logic — no terminal types —
 /// so it can be unit tested and simulated headlessly.
 pub struct StackJump {

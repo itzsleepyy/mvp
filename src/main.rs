@@ -26,7 +26,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         ),
         Some(Command::AgentEvent { args }) => {
             // Used by agent hook commands. Never prints to stdout, never
-            // launches a TUI, and exits 0 even when WaitState is not
+            // launches a TUI, and exits 0 even when MVP is not
             // running: a missing game must never disturb the agent.
             let (kind, event) =
                 cli::parse_agent_event_args(&args).map_err(std::io::Error::other)?;
@@ -43,7 +43,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             // Bridge for hook systems whose protocol requires one JSON
             // object on stdout (Codex, Gemini). "{}" carries no decision,
             // no additional context: purely observational. Always exit 0 —
-            // exit 2 blocks Codex turns and Gemini tools, which WaitState
+            // exit 2 blocks Codex turns and Gemini tools, which MVP
             // must never do.
             let kind = agent.into_agent_kind();
             match ipc::send_event(kind, event) {
@@ -126,6 +126,9 @@ fn run(
     app.set_agent_auto_resume(!no_auto_resume);
     let size = terminal.size()?;
     app.set_terminal_size(size.width, size.height);
+    if !app.has_player_name() {
+        app.open_name_prompt();
+    }
 
     let server = match ipc::IpcServer::start(ipc::socket_path()) {
         Ok(Some(server)) => {
@@ -133,7 +136,7 @@ fn run(
             Some(server)
         }
         Ok(None) => {
-            crate::debug_log!("another WaitState instance owns the IPC socket");
+            crate::debug_log!("another MVP instance owns the IPC socket");
             None
         }
         Err(err) => {
@@ -151,7 +154,7 @@ fn run(
                 app.handle_agent_event(kind, event);
             }
         }
-        while let Some(input) = event::next_input()? {
+        while let Some(input) = event::next_input(app.state == app::AppState::NamePrompt)? {
             app.handle_input(input);
             if app.should_quit() {
                 break;

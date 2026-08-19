@@ -20,7 +20,7 @@ use crate::ipc::protocol::{AgentMessage, MAX_MESSAGE_BYTES};
 ///
 /// `pid` records the owning process so a *stale* socket file is recognised
 /// even when the OS has since handed the port to an unrelated process
-/// (ephemeral port reuse). Without the liveness check, a fresh WaitState
+/// (ephemeral port reuse). Without the liveness check, a fresh MVP
 /// could probe a stale file, connect to some other listener, and wrongly
 /// decide another instance owns the socket — running without an IPC server.
 #[derive(Debug, Serialize, Deserialize)]
@@ -45,7 +45,7 @@ impl IpcServer {
     /// Binds loopback and starts the accept thread.
     ///
     /// Returns `Ok(None)` when the socket path is owned by another live
-    /// WaitState instance (checked by connecting to it), so a second
+    /// MVP instance (checked by connecting to it), so a second
     /// instance never steals the first one's agent events.
     pub fn start(socket_path: PathBuf) -> std::io::Result<Option<Self>> {
         if let Some(owner) = read_socket_info(&socket_path)
@@ -72,7 +72,7 @@ impl IpcServer {
         let thread_token = info.token.clone();
         let thread_path = socket_path.clone();
         thread::Builder::new()
-            .name("waitstate-ipc".into())
+            .name("mvp-ipc".into())
             .spawn(move || {
                 accept_loop(listener, thread_running, thread_token, thread_path, sender)
             })?;
@@ -106,7 +106,7 @@ impl Drop for IpcServer {
     }
 }
 
-/// True when a WaitState instance can be reached at the given socket info.
+/// True when a MVP instance can be reached at the given socket info.
 /// A bounded probe: any failure means "not running". The recorded owner PID
 /// must be alive first, so a stale file whose port was reused by some
 /// unrelated process never counts as an owner.
@@ -192,10 +192,10 @@ pub fn socket_path() -> PathBuf {
                 let user = std::env::var("USER")
                     .or_else(|_| std::env::var("USERNAME"))
                     .unwrap_or_else(|_| "user".into());
-                std::env::temp_dir().join(format!("waitstate-{user}"))
+                std::env::temp_dir().join(format!("mvp-{user}"))
             }
         };
-    dir.join("waitstate.sock")
+    dir.join("mvp.sock")
 }
 
 pub(crate) fn read_socket_info(path: &Path) -> Option<SocketInfo> {
@@ -239,11 +239,7 @@ mod tests {
     use std::net::SocketAddr;
 
     fn temp_socket_path(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "waitstate_ipc_test_{}_{}.sock",
-            std::process::id(),
-            name
-        ))
+        std::env::temp_dir().join(format!("mvp_ipc_test_{}_{}.sock", std::process::id(), name))
     }
 
     fn wait_for<T>(mut poll: impl FnMut() -> Option<T>, timeout: Duration) -> Option<T> {
@@ -410,7 +406,7 @@ mod tests {
     fn stale_socket_file_is_reclaimed_even_when_the_port_answers() {
         // Regression: after an unclean exit, the OS may hand the recorded
         // port to an unrelated process. The dead owner PID must win over
-        // the port probe, otherwise WaitState silently runs without IPC.
+        // the port probe, otherwise MVP silently runs without IPC.
         let path = temp_socket_path("staleport");
         let _ = std::fs::remove_file(&path);
 

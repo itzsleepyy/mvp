@@ -1,4 +1,4 @@
-//! Safe merging of WaitState hooks into the Claude Code settings file.
+//! Safe merging of MVP hooks into the Claude Code settings file.
 //!
 //! Claude-specific parts (the hook table, handler shape, ownership
 //! detection) live here; the destructive-edit-safety lives in
@@ -28,7 +28,7 @@ pub fn config_path() -> PathBuf {
     home.join(".claude").join("settings.json")
 }
 
-/// How many of the six hook events have an up-to-date WaitState hook.
+/// How many of the six hook events have an up-to-date MVP hook.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HookStatus {
     pub installed: usize,
@@ -69,7 +69,7 @@ impl ClaudeConfig {
         })
     }
 
-    /// Merges the WaitState hook set into the settings. Returns the number
+    /// Merges the MVP hook set into the settings. Returns the number
     /// of changes made (0 when already installed). Existing hooks and all
     /// other settings are preserved.
     pub fn install_hooks(&mut self, binary: &Path) -> usize {
@@ -77,20 +77,21 @@ impl ClaudeConfig {
             &hook_specs(),
             &binary.display().to_string(),
             claude_handler,
-            is_waitstate_for,
+            is_mvp_for,
         )
     }
 
-    /// Removes every WaitState-owned hook. Returns the number removed.
-    /// Handlers are identified by the executable name (`waitstate`) plus
+    /// Removes every MVP-owned hook. Returns the number removed.
+    /// Handlers are identified by the executable name (`mvp`, plus the
+    /// pre-rebrand `waitstate`) and
     /// the `agent-event` argument, so a moved binary is still recognised.
     pub fn uninstall_hooks(&mut self) -> usize {
-        self.inner.uninstall(is_waitstate)
+        self.inner.uninstall(is_mvp)
     }
 
-    /// True when all hook events have an up-to-date WaitState hook.
+    /// True when all hook events have an up-to-date MVP hook.
     pub fn hook_status(&self) -> HookStatus {
-        let (installed, total) = self.inner.status(&hook_specs(), is_waitstate_for);
+        let (installed, total) = self.inner.status(&hook_specs(), is_mvp_for);
         HookStatus { installed, total }
     }
 
@@ -113,8 +114,8 @@ fn claude_handler(binary: &str, event: AgentEvent) -> Value {
     })
 }
 
-/// True for any WaitState hook handler, whatever event it sends.
-fn is_waitstate(handler: &Value) -> bool {
+/// True for any MVP hook handler, whatever event it sends.
+fn is_mvp(handler: &Value) -> bool {
     let is_binary = handler
         .get("command")
         .and_then(Value::as_str)
@@ -127,9 +128,9 @@ fn is_waitstate(handler: &Value) -> bool {
     is_binary && is_event_command
 }
 
-/// True for a WaitState hook handler sending `event`.
-fn is_waitstate_for(handler: &Value, event: AgentEvent) -> bool {
-    is_waitstate(handler)
+/// True for a MVP hook handler sending `event`.
+fn is_mvp_for(handler: &Value, event: AgentEvent) -> bool {
+    is_mvp(handler)
         && handler
             .get("args")
             .and_then(Value::as_array)
@@ -140,13 +141,13 @@ fn is_waitstate_for(handler: &Value, event: AgentEvent) -> bool {
 mod tests {
     use super::*;
 
-    const BINARY_A: &str = "/opt/waitstate";
-    const BINARY_B: &str = "/usr/local/bin/waitstate";
+    const BINARY_A: &str = "/opt/mvp";
+    const BINARY_B: &str = "/usr/local/bin/mvp";
 
     fn temp_config(name: &str, content: &str) -> PathBuf {
         let mut path = std::env::temp_dir();
         path.push(format!(
-            "waitstate_claude_test_{}_{}/settings.json",
+            "mvp_claude_test_{}_{}/settings.json",
             std::process::id(),
             name
         ));
@@ -293,7 +294,7 @@ mod tests {
     }
 
     #[test]
-    fn uninstall_removes_only_waitstate_hooks() {
+    fn uninstall_removes_only_mvp_hooks() {
         let path = temp_config(
             "uninstall",
             r#"{
@@ -319,7 +320,7 @@ mod tests {
                                 },
                                 {
                                     "type": "command",
-                                    "command": "/opt/waitstate",
+                                    "command": "/opt/mvp",
                                     "args": ["agent-event", "completed"],
                                     "async": true
                                 }
@@ -374,7 +375,7 @@ mod tests {
                             "hooks": [
                                 {
                                     "type": "command",
-                                    "command": "C:\\Program Files\\WaitState\\waitstate.exe",
+                                    "command": "C:\\Program Files\\MVP\\waitstate.exe",
                                     "args": ["agent-event", "completed"],
                                     "async": true
                                 }
@@ -417,7 +418,7 @@ mod tests {
                             "hooks": [
                                 {
                                     "type": "command",
-                                    "command": "/opt/waitstate",
+                                    "command": "/opt/mvp",
                                     "args": ["agent-event", "completed"],
                                     "async": true
                                 }
@@ -435,7 +436,7 @@ mod tests {
     }
 
     #[test]
-    fn handlers_sending_other_agent_events_count_as_waitstate() {
+    fn handlers_sending_other_agent_events_count_as_mvp() {
         let path = temp_config(
             "other",
             r#"{
@@ -445,7 +446,7 @@ mod tests {
                             "hooks": [
                                 {
                                     "type": "command",
-                                    "command": "/opt/waitstate",
+                                    "command": "/opt/mvp",
                                     "args": ["agent-event", "working"],
                                     "async": true
                                 }

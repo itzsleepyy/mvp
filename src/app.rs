@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use crate::agent::{AgentDisplay, AgentEvent, AgentKind, AgentState, AgentStatus};
-use crate::config::HighScoreStore;
+use crate::config::{DailyMvp, HighScoreStore};
 use crate::event::AppInput;
 use crate::game::{ActiveGame, GameInput, GameKind};
 use crate::ui;
@@ -10,6 +10,12 @@ use crate::ui;
 /// Minimum usable terminal size, in columns × rows.
 pub const MIN_COLS: u16 = 60;
 pub const MIN_ROWS: u16 = 20;
+
+/// Longest accepted player name.
+const NAME_LIMIT: usize = 24;
+
+/// Characters a player name may contain.
+const NAME_LEGAL: &str = " -_.'!@#$&+=()";
 
 /// Why the game was paused by the agent. Manual pauses are tracked
 /// separately as [`AppState::PausedManual`] so agent events can never
@@ -22,12 +28,14 @@ pub enum PauseReason {
 }
 
 /// Top-level application states. `Playing`/`PausedManual`/`PausedAgent`/
-/// `GameOver` are all sub-states of a live run; `Menu` is the idle screen
-/// and `GameMenu` the game selection between them.
+/// `GameOver` are all sub-states of a live run; `Menu` is the idle screen,
+/// `GameMenu` the game selection between them, and `NamePrompt` the
+/// first-run (or rename) player-name entry screen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppState {
     Menu,
     GameMenu,
+    NamePrompt,
     Playing,
     PausedManual,
     PausedAgent(PauseReason),
@@ -45,6 +53,11 @@ pub struct App {
     store: HighScoreStore,
     terminal_size: Option<(u16, u16)>,
     new_record: bool,
+    /// The name being typed in the [`AppState::NamePrompt`]; saved to the
+    /// store on confirm.
+    name_buffer: String,
+    /// True while the finished run just became today's MVP.
+    mvp_just_set: bool,
     should_quit: bool,
     /// One entry per agent kind; the aggregate view drives the UI and the
     /// pause/resume transitions.
@@ -76,6 +89,8 @@ impl App {
             store,
             terminal_size: None,
             new_record: false,
+            name_buffer: String::new(),
+            mvp_just_set: false,
             should_quit: false,
             agents: HashMap::new(),
             activity_seq: 0,
@@ -93,6 +108,7 @@ impl App {
             AppInput::Confirm => match self.state {
                 AppState::Menu => self.state = AppState::GameMenu,
                 AppState::GameMenu => self.start_game(),
+                AppState::NamePrompt => self.submit_name(),
                 AppState::GameOver => self.restart_same_game(),
                 AppState::PausedAgent(_) => self.resume(),
                 AppState::Playing => self.game_input(GameInput::Confirm),
@@ -117,8 +133,24 @@ impl App {
                     self.restart_same_game();
                 }
             }
+            AppInput::Rename => {
+                if self.state == AppState::Menu {
+                    self.open_name_prompt();
+                }
+            }
+            AppInput::Text(c) => {
+                if self.state == AppState::NamePrompt {
+                    self.type_name(c);
+                }
+            }
+            AppInput::Backspace => {
+                if self.state == AppState::NamePrompt {
+                    self.name_buffer.pop();
+                }
+            }
             AppInput::Back => match self.state {
                 AppState::Menu => {}
+                AppState::NamePrompt => self.dismiss_name_prompt(),
                 AppState::GameMenu => self.state = AppState::Menu,
                 AppState::Playing
                 | AppState::PausedManual
@@ -141,6 +173,7 @@ impl App {
         let (cols, rows) = self.playfield_dims();
         self.game = Some(ActiveGame::new(kind, rand::random::<u64>(), cols, rows));
         self.new_record = false;
+        self.mvp_just_set = false;
         self.state = AppState::Playing;
     }
 
@@ -173,7 +206,11 @@ impl App {
             AppState::PausedManual | AppState::PausedAgent(_) => {
                 self.state = AppState::Playing;
             }
-            AppState::Menu | AppState::GameMenu | AppState::Playing | AppState::GameOver => {}
+            AppState::Menu
+            | AppState::GameMenu
+            | AppState::NamePrompt
+            | AppState::Playing
+            | AppState::GameOver => {}
         }
     }
 
@@ -184,8 +221,47 @@ impl App {
             // Pressing P while the agent paused the game hands control
             // back to the developer as a manual pause.
             AppState::PausedAgent(_) => self.state = AppState::PausedManual,
-            AppState::Menu | AppState::GameMenu | AppState::GameOver => {}
+            AppState::Menu | AppState::GameMenu | AppState::NamePrompt | AppState::GameOver => {}
         }
+    }
+
+    // ---- name prompt ------------------------------------------------------
+
+    /// Opens the player-name prompt with a fresh buffer.
+    pub fn open_name_prompt(&mut self) {
+        self.name_buffer.clear();
+        self.state = AppState::NamePrompt;
+    }
+
+    /// Confirms the typed name: an empty buffer keeps prompting.
+    fn submit_name(&mut self) {
+        let name = self.name_buffer.trim();
+        if name.is_empty() {
+            return;
+        }
+        self.store.set_player_name(name);
+        self.name_buffer.clear();
+        self.state = AppState::Menu;
+    }
+
+    /// Dismisses the prompt, keeping whatever was typed (or the fallback
+    /// anonymous name).
+    fn dismiss_name_prompt(&mut self) {
+        self.store.set_player_name(&self.name_buffer);
+        self.name_buffer.clear();
+        self.state = AppState::Menu;
+    }
+
+    /// Appends one character to the name being typed, when it is
+    /// name-legal and the buffer is under the limit.
+    fn type_name(&mut self, c: char) {
+        if self.name_buffer.chars().count() >= NAME_LIMIT {
+            return;
+        }
+        if !c.is_alphanumeric() && !NAME_LEGAL.contains(c) {
+            return;
+        }
+        self.name_buffer.push(c);
     }
 
     pub fn back_to_menu(&mut self) {
@@ -291,7 +367,11 @@ impl App {
                     self.pause_involved = self.agents_with_status(AgentStatus::Stopped);
                 }
             }
-            AppState::Menu | AppState::GameMenu | AppState::PausedManual | AppState::GameOver => {}
+            AppState::Menu
+            | AppState::GameMenu
+            | AppState::NamePrompt
+            | AppState::PausedManual
+            | AppState::GameOver => {}
         }
     }
 
@@ -420,7 +500,9 @@ impl App {
             .as_ref()
             .map(ActiveGame::kind)
             .unwrap_or(GameKind::StackJump);
+        let name = self.player_name().to_string();
         self.new_record = self.store.record(kind, score);
+        self.mvp_just_set = self.store.record_daily_mvp(&name, kind, score);
         self.state = AppState::GameOver;
     }
 
@@ -458,6 +540,12 @@ impl App {
         self.game.as_ref()
     }
 
+    /// Mutable access for tests (spawning obstacles, forcing chips, ...).
+    #[cfg(test)]
+    pub(crate) fn game_mut(&mut self) -> Option<&mut ActiveGame> {
+        self.game.as_mut()
+    }
+
     /// The best score across every game.
     pub fn best_score(&self) -> u64 {
         self.store.high_score()
@@ -477,6 +565,32 @@ impl App {
     /// game-over panel until the next run starts).
     pub fn is_new_record(&self) -> bool {
         self.new_record
+    }
+
+    /// The name shown in the UI ("Anonymous" until the prompt is answered).
+    pub fn player_name(&self) -> &str {
+        self.store.player_name()
+    }
+
+    /// True once the first-run name prompt has been answered.
+    pub fn has_player_name(&self) -> bool {
+        self.store.has_player_name()
+    }
+
+    /// The name being typed in the name prompt.
+    pub fn name_buffer(&self) -> &str {
+        &self.name_buffer
+    }
+
+    /// Today's MVP of the day, if one exists.
+    pub fn daily_mvp(&self) -> Option<&DailyMvp> {
+        self.store.daily_mvp()
+    }
+
+    /// True while the finished run just became today's MVP (shown on the
+    /// game-over panel until the next run starts).
+    pub fn mvp_just_set(&self) -> bool {
+        self.mvp_just_set
     }
 
     #[cfg(test)]
@@ -538,15 +652,24 @@ mod tests {
     const G: AgentKind = AgentKind::GeminiCli;
     const O: AgentKind = AgentKind::OpenCode;
 
-    fn temp_store(name: &str) -> HighScoreStore {
-        let mut path = std::env::temp_dir();
-        path.push(format!(
-            "waitstate_app_test_{}_{}",
+    /// Unique-per-call temp directory: parallel tests never share a store
+    /// (and the daily-MVP file inside it).
+    fn temp_dir(name: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "mvp_app_test_{}_{}_{}",
             std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed),
             name
         ));
-        let _ = std::fs::remove_file(&path);
-        HighScoreStore::load(path)
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        dir
+    }
+
+    fn temp_store(name: &str) -> HighScoreStore {
+        HighScoreStore::load(temp_dir(name).join("highscore.json"))
     }
 
     fn app_with_size(store: HighScoreStore, cols: u16, rows: u16) -> App {
@@ -831,13 +954,8 @@ mod tests {
 
     #[test]
     fn high_score_survives_across_app_instances() {
-        let mut path = std::env::temp_dir();
-        path.push(format!(
-            "waitstate_app_test_{}_{}",
-            std::process::id(),
-            "persist.json"
-        ));
-        let _ = std::fs::remove_file(&path);
+        let dir = temp_dir("persist");
+        let path = dir.join("highscore.json");
 
         let mut first = app_with_size(HighScoreStore::load(&path), 100, 30);
         first.start_game();
@@ -1393,6 +1511,7 @@ mod tests {
     #[test]
     fn agent_pause_freezes_twenty_one() {
         let mut app = twenty_one_app("freeze.json");
+        app.setup_test_twenty_one_hands(); // neutralize the opening deal
         app.handle_agent_event(C, AgentEvent::NeedsInput);
         assert_eq!(app.state, AppState::PausedAgent(PauseReason::NeedsInput));
 
@@ -1431,7 +1550,8 @@ mod tests {
     #[test]
     fn twenty_one_game_over_records_the_best_and_restarts_the_same_game() {
         let mut app = twenty_one_app("over.json");
-        app.game
+        app.setup_test_twenty_one_hands(); // no natural on the opening deal
+        app.game_mut()
             .as_mut()
             .unwrap()
             .as_twenty_one_mut()
@@ -1448,8 +1568,160 @@ mod tests {
 
         app.handle_input(AppInput::Restart);
         assert_eq!(app.state, AppState::Playing);
+        app.setup_test_twenty_one_hands(); // neutralize the fresh random deal
         let game = app.game().unwrap().as_twenty_one().unwrap();
         assert_eq!(game.chips(), crate::game::twenty_one::STARTING_CHIPS);
         assert!(!game.is_game_over());
+    }
+
+    // ---- name prompt --------------------------------------------------------
+
+    #[test]
+    fn first_run_opens_the_name_prompt_and_confirms_a_name() {
+        let mut app = app_with_size(temp_store("nameprompt.json"), 100, 30);
+        app.open_name_prompt();
+        assert_eq!(app.state, AppState::NamePrompt);
+        assert!(!app.has_player_name());
+
+        app.handle_input(AppInput::Text('A'));
+        app.handle_input(AppInput::Text('l'));
+        app.handle_input(AppInput::Text('e'));
+        app.handle_input(AppInput::Text('x'));
+        assert_eq!(app.name_buffer(), "Alex");
+
+        app.handle_input(AppInput::Confirm);
+        assert_eq!(app.state, AppState::Menu);
+        assert!(app.has_player_name());
+        assert_eq!(app.player_name(), "Alex");
+    }
+
+    #[test]
+    fn name_prompt_requires_a_non_empty_name() {
+        let mut app = app_with_size(temp_store("emptyname.json"), 100, 30);
+        app.open_name_prompt();
+        app.handle_input(AppInput::Confirm);
+        assert_eq!(
+            app.state,
+            AppState::NamePrompt,
+            "an empty name must keep prompting"
+        );
+        assert!(!app.has_player_name());
+    }
+
+    #[test]
+    fn name_prompt_esc_dismisses_with_what_was_typed() {
+        let mut app = app_with_size(temp_store("escnone.json"), 100, 30);
+        app.open_name_prompt();
+        app.handle_input(AppInput::Back);
+        assert_eq!(app.state, AppState::Menu);
+        assert_eq!(app.player_name(), "Anonymous");
+
+        app.open_name_prompt();
+        app.handle_input(AppInput::Text('S'));
+        app.handle_input(AppInput::Text('a'));
+        app.handle_input(AppInput::Text('m'));
+        app.handle_input(AppInput::Back);
+        assert_eq!(app.state, AppState::Menu);
+        assert_eq!(app.player_name(), "Sam");
+    }
+
+    #[test]
+    fn name_prompt_supports_backspace_and_filters_characters() {
+        let mut app = app_with_size(temp_store("backspace.json"), 100, 30);
+        app.open_name_prompt();
+        app.handle_input(AppInput::Text('H'));
+        app.handle_input(AppInput::Text('i'));
+        app.handle_input(AppInput::Backspace);
+        app.handle_input(AppInput::Text('o'));
+        app.handle_input(AppInput::Backspace);
+        app.handle_input(AppInput::Text('A'));
+        app.handle_input(AppInput::Text('💩'));
+        assert_eq!(app.name_buffer(), "HA", "backspace then a filtered char");
+        app.handle_input(AppInput::Confirm);
+        assert_eq!(app.player_name(), "HA");
+    }
+
+    #[test]
+    fn n_on_the_menu_opens_the_name_prompt_elsewhere_ignored() {
+        let mut app = app_with_size(temp_store("rename.json"), 100, 30);
+        app.handle_input(AppInput::Rename);
+        assert_eq!(app.state, AppState::NamePrompt);
+
+        let mut playing = playing_app();
+        playing.handle_input(AppInput::Rename);
+        assert_eq!(playing.state, AppState::Playing);
+    }
+
+    #[test]
+    fn name_prompt_survives_agent_events() {
+        let mut app = app_with_size(temp_store("nameagent.json"), 100, 30);
+        app.open_name_prompt();
+        app.handle_agent_event(C, AgentEvent::NeedsInput);
+        app.handle_agent_event(X, AgentEvent::Working);
+        assert_eq!(app.state, AppState::NamePrompt);
+        app.tick(Duration::from_secs(1));
+        assert_eq!(app.state, AppState::NamePrompt);
+    }
+
+    #[test]
+    fn renamed_player_appears_on_the_board() {
+        let mut app = app_with_size(temp_store("renamed.json"), 100, 30);
+        app.open_name_prompt();
+        app.handle_input(AppInput::Text('A'));
+        app.handle_input(AppInput::Confirm);
+        assert_eq!(app.player_name(), "A");
+
+        app.open_name_prompt();
+        app.handle_input(AppInput::Text('B'));
+        app.handle_input(AppInput::Text('o'));
+        app.handle_input(AppInput::Text('b'));
+        app.handle_input(AppInput::Confirm);
+        assert_eq!(app.player_name(), "Bob");
+    }
+
+    // ---- daily MVP ----------------------------------------------------------
+
+    #[test]
+    fn finishing_a_run_sets_the_daily_mvp_for_today() {
+        let mut app = playing_app();
+        assert!(!app.has_player_name());
+        app.tick(Duration::from_secs(1));
+        collide(&mut app);
+        app.tick(Duration::from_millis(16));
+        assert_eq!(app.state, AppState::GameOver);
+        assert!(app.mvp_just_set());
+        let mvp = app.daily_mvp().expect("daily mvp set");
+        assert_eq!(mvp.name, "Anonymous");
+        assert_eq!(mvp.game_kind(), GameKind::StackJump);
+    }
+
+    #[test]
+    fn a_lower_score_does_not_dethrone_the_daily_mvp() {
+        let mut app = playing_app();
+        app.tick(Duration::from_secs(2));
+        collide(&mut app);
+        app.tick(Duration::from_millis(16));
+        let mvp_score = app.daily_mvp().unwrap().score;
+
+        app.start_game();
+        collide(&mut app); // immediate death: score ~0
+        app.tick(Duration::from_millis(16));
+        assert_eq!(app.daily_mvp().unwrap().score, mvp_score);
+        assert!(!app.mvp_just_set());
+    }
+
+    #[test]
+    fn twenty_one_peak_chips_compete_for_the_daily_mvp() {
+        let mut app = twenty_one_app("mvp21.json");
+        app.game
+            .as_mut()
+            .unwrap()
+            .as_twenty_one_mut()
+            .unwrap()
+            .force_chips(crate::game::twenty_one::BET - 1);
+        app.handle_input(AppInput::Confirm);
+        app.tick(Duration::from_millis(16));
+        assert_eq!(app.state, AppState::GameOver);
+        assert_eq!(app.daily_mvp().unwrap().game_kind(), GameKind::TwentyOne);
     }
 }

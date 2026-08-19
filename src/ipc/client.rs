@@ -1,4 +1,4 @@
-//! The IPC client: sends one lifecycle event to the running WaitState
+//! The IPC client: sends one lifecycle event to the running MVP
 //! instance and exits. Used by coding-agent hook commands, which must never
 //! hang or produce output — every failure mode is a fast, silent exit.
 
@@ -13,7 +13,7 @@ use crate::ipc::protocol::AgentMessage;
 use crate::ipc::server::{read_socket_info, socket_path};
 
 /// Sends `event` for `kind` to the running instance discovered via the
-/// default socket file. Errors mean "WaitState is not running" and are safe
+/// default socket file. Errors mean "MVP is not running" and are safe
 /// to ignore.
 pub fn send_event(kind: AgentKind, event: AgentEvent) -> Result<(), String> {
     send_event_to(socket_path(), kind, event)
@@ -21,10 +21,10 @@ pub fn send_event(kind: AgentKind, event: AgentEvent) -> Result<(), String> {
 
 /// Same as [`send_event`], with an explicit socket path (used by tests).
 pub fn send_event_to(path: PathBuf, kind: AgentKind, event: AgentEvent) -> Result<(), String> {
-    let info = read_socket_info(&path).ok_or("WaitState is not running")?;
+    let info = read_socket_info(&path).ok_or("MVP is not running")?;
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], info.port));
     let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(1))
-        .map_err(|_| "WaitState is not reachable")?;
+        .map_err(|_| "MVP is not reachable")?;
     stream
         .set_write_timeout(Some(Duration::from_secs(1)))
         .map_err(|e| e.to_string())?;
@@ -36,7 +36,7 @@ pub fn send_event_to(path: PathBuf, kind: AgentKind, event: AgentEvent) -> Resul
         .map_err(|e| e.to_string())
 }
 
-/// True when a WaitState instance is currently reachable. Does not send an
+/// True when a MVP instance is currently reachable. Does not send an
 /// event — a pure connectivity probe.
 pub fn running() -> bool {
     match read_socket_info(&socket_path()) {
@@ -56,7 +56,7 @@ mod tests {
     fn send_event_to_missing_socket_file_fails_cleanly() {
         let mut path = std::env::temp_dir();
         path.push(format!(
-            "waitstate_client_test_{}_missing.sock",
+            "mvp_client_test_{}_missing.sock",
             std::process::id()
         ));
         let _ = std::fs::remove_file(&path);
@@ -70,7 +70,7 @@ mod tests {
     fn send_event_to_garbage_socket_file_fails_cleanly() {
         let mut path = std::env::temp_dir();
         path.push(format!(
-            "waitstate_client_test_{}_garbage.sock",
+            "mvp_client_test_{}_garbage.sock",
             std::process::id()
         ));
         std::fs::write(&path, b"this is not json").unwrap();
