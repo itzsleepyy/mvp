@@ -64,15 +64,10 @@ fn install_into(dir: &Path, binary: &Path) -> Result<(), String> {
     std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
 
     let legacy = dir.join(plugin::LEGACY_PLUGIN_FILE_NAME);
-    if legacy.exists()
-        && let Ok(content) = std::fs::read_to_string(&legacy)
-        && is_mvp_owned(&content)
-    {
-        let _ = std::fs::remove_file(&legacy);
-    }
+    let legacy_owned = owned_file_exists(&legacy)?;
 
     let source = plugin_source(binary);
-    match std::fs::read_to_string(&path) {
+    let message = match std::fs::read_to_string(&path) {
         Ok(existing) => {
             if !is_mvp_owned(&existing) {
                 return Err(format!(
@@ -81,63 +76,82 @@ fn install_into(dir: &Path, binary: &Path) -> Result<(), String> {
                 ));
             }
             if existing == source {
-                println!("MVP plugin is already installed and up to date.");
-                println!("Plugin: {}", path.display());
-                return Ok(());
+                "MVP plugin is already installed and up to date.".to_string()
+            } else {
+                let version = installed_version(&existing).unwrap_or(0);
+                let backup =
+                    path.with_file_name(format!("{PLUGIN_FILE_NAME}.mvp-backup-{version}"));
+                std::fs::copy(&path, &backup).map_err(|e| {
+                    format!(
+                        "cannot back up {} to {}: {e}",
+                        path.display(),
+                        backup.display()
+                    )
+                })?;
+                std::fs::write(&path, source)
+                    .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+                format!("MVP plugin updated (v{version} -> v{PLUGIN_VERSION}).")
             }
-            let version = installed_version(&existing).unwrap_or(0);
-            let backup = path.with_file_name(format!("{PLUGIN_FILE_NAME}.ws-backup-{version}"));
-            std::fs::copy(&path, &backup).map_err(|e| {
-                format!(
-                    "cannot back up {} to {}: {e}",
-                    path.display(),
-                    backup.display()
-                )
-            })?;
-            std::fs::write(&path, source)
-                .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
-            println!("MVP plugin updated (v{version} → v{PLUGIN_VERSION}).");
-            println!("Plugin: {}", path.display());
-            println!("A backup of the previous plugin was saved next to it.");
-            Ok(())
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             std::fs::write(&path, source)
                 .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
-            println!("MVP plugin installed.");
-            println!("Plugin: {}", path.display());
-            Ok(())
+            "MVP plugin installed.".to_string()
         }
+        Err(e) => return Err(format!("cannot read {}: {e}", path.display())),
+    };
+
+    if legacy_owned {
+        std::fs::remove_file(&legacy)
+            .map_err(|e| format!("cannot remove legacy plugin {}: {e}", legacy.display()))?;
+    }
+
+    println!("{message}");
+    println!("Plugin: {}", path.display());
+    Ok(())
+}
+
+fn owned_file_exists(path: &Path) -> Result<bool, String> {
+    match std::fs::read_to_string(path) {
+        Ok(content) => Ok(is_mvp_owned(&content)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(e) => Err(format!("cannot read {}: {e}", path.display())),
     }
 }
 
-/// Removes the MVP plugin file — and only that file.
+fn remove_owned_file(path: &Path) -> Result<bool, String> {
+    let content = match std::fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(format!("cannot read {}: {e}", path.display())),
+    };
+    if !is_mvp_owned(&content) {
+        println!("{} is not an MVP plugin - left untouched.", path.display());
+        return Ok(false);
+    }
+    std::fs::remove_file(path).map_err(|e| format!("cannot remove {}: {e}", path.display()))?;
+    Ok(true)
+}
+
+/// Removes current and legacy MVP-owned plugin files, leaving foreign files.
 pub fn uninstall() -> Result<(), String> {
     uninstall_from(&plugin_dir())
 }
 
 fn uninstall_from(dir: &Path) -> Result<(), String> {
     let path = dir.join(PLUGIN_FILE_NAME);
-    let content = match std::fs::read_to_string(&path) {
-        Ok(content) => content,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            println!("No MVP plugin found — nothing to remove.");
-            return Ok(());
-        }
-        Err(e) => return Err(format!("cannot read {}: {e}", path.display())),
-    };
-    if !is_mvp_owned(&content) {
-        println!("{} is not a MVP plugin — left untouched.", path.display());
-        return Ok(());
+    let legacy = dir.join(plugin::LEGACY_PLUGIN_FILE_NAME);
+    let removed_current = remove_owned_file(&path)?;
+    let removed_legacy = remove_owned_file(&legacy)?;
+    if removed_current || removed_legacy {
+        println!("Removed MVP plugin.");
+    } else {
+        println!("No MVP plugin found - nothing to remove.");
     }
-    std::fs::remove_file(&path).map_err(|e| format!("cannot remove {}: {e}", path.display()))?;
-    println!("Removed MVP plugin.");
-    println!("Plugin: {}", path.display());
     Ok(())
 }
 
-/// Prints the integration status (see the README for the output shape).
+/// Prints the integration status.
 pub fn status() {
     println!("OpenCode integration");
     println!();
@@ -151,14 +165,25 @@ pub fn status_state() -> ProviderStatus {
 
 fn status_state_at(dir: &Path) -> ProviderStatus {
     let path = dir.join(PLUGIN_FILE_NAME);
+    let legacy = dir.join(plugin::LEGACY_PLUGIN_FILE_NAME);
+    let legacy_owned = match owned_file_exists(&legacy) {
+        Ok(owned) => owned,
+        Err(error) => return ProviderStatus::Broken(error),
+    };
     match std::fs::read_to_string(&path) {
         Ok(content) => match installed_version(&content) {
+            Some(version) if version == PLUGIN_VERSION && legacy_owned => ProviderStatus::Outdated(
+                "current and legacy plugins are both installed".to_string(),
+            ),
             Some(version) if version == PLUGIN_VERSION => ProviderStatus::Current,
             Some(version) => ProviderStatus::Outdated(format!(
                 "plugin v{version} found, v{PLUGIN_VERSION} expected"
             )),
-            None => ProviderStatus::Broken(format!("{} is not a MVP plugin", path.display())),
+            None => ProviderStatus::Broken(format!("{} is not an MVP plugin", path.display())),
         },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound && legacy_owned => {
+            ProviderStatus::Outdated("legacy plugin installed".to_string())
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => ProviderStatus::NotInstalled,
         Err(e) => ProviderStatus::Broken(format!("cannot read {}: {e}", path.display())),
     }
@@ -280,7 +305,7 @@ mod tests {
         let backups: Vec<_> = std::fs::read_dir(&dir)
             .unwrap()
             .filter_map(|e| e.ok())
-            .filter(|e| e.file_name().to_string_lossy().contains("ws-backup"))
+            .filter(|e| e.file_name().to_string_lossy().contains("mvp-backup"))
             .collect();
         assert_eq!(backups.len(), 0, "idempotent installs write no backups");
 
@@ -296,7 +321,7 @@ mod tests {
         let backups: Vec<_> = std::fs::read_dir(&dir)
             .unwrap()
             .filter_map(|e| e.ok())
-            .filter(|e| e.file_name().to_string_lossy().contains("ws-backup"))
+            .filter(|e| e.file_name().to_string_lossy().contains("mvp-backup"))
             .collect();
         assert_eq!(backups.len(), 1);
 
@@ -313,6 +338,24 @@ mod tests {
         let err = install_into(&dir, Path::new(BINARY_A)).unwrap_err();
         assert!(err.contains("not MVP-owned"));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), foreign);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn failed_install_preserves_owned_legacy_and_foreign_current_plugins() {
+        let dir = temp_plugin_dir("legacyforeigncurrent");
+        let legacy = dir.join(plugin::LEGACY_PLUGIN_FILE_NAME);
+        let current = dir.join(PLUGIN_FILE_NAME);
+        let legacy_source = "// WAITSTATE_OPENCODE_PLUGIN v1\nlegacy content";
+        let foreign_source = "export const Mine = async () => ({})";
+        std::fs::write(&legacy, legacy_source).unwrap();
+        std::fs::write(&current, foreign_source).unwrap();
+
+        let err = install_into(&dir, Path::new(BINARY_A)).unwrap_err();
+        assert!(err.contains("not MVP-owned"));
+        assert_eq!(std::fs::read_to_string(&legacy).unwrap(), legacy_source);
+        assert_eq!(std::fs::read_to_string(&current).unwrap(), foreign_source);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -347,6 +390,28 @@ mod tests {
 
         uninstall_from(&dir).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), foreign);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn legacy_plugin_is_reported_repaired_and_uninstalled_safely() {
+        let dir = temp_plugin_dir("legacylifecycle");
+        let legacy = dir.join(plugin::LEGACY_PLUGIN_FILE_NAME);
+        std::fs::write(&legacy, "// WAITSTATE_OPENCODE_PLUGIN v1\nlegacy content").unwrap();
+
+        assert!(matches!(status_state_at(&dir), ProviderStatus::Outdated(_)));
+        assert!(needs_repair_state(&dir));
+
+        install_into(&dir, Path::new(BINARY_A)).unwrap();
+        assert!(!legacy.exists());
+        assert_eq!(status_state_at(&dir), ProviderStatus::Current);
+
+        std::fs::write(&legacy, "// WAITSTATE_OPENCODE_PLUGIN v1\nlegacy content").unwrap();
+        uninstall_from(&dir).unwrap();
+        assert!(!legacy.exists());
+        assert!(!dir.join(PLUGIN_FILE_NAME).exists());
+        uninstall_from(&dir).unwrap();
 
         let _ = std::fs::remove_dir_all(&dir);
     }

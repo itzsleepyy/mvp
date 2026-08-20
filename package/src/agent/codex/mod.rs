@@ -33,10 +33,8 @@
 //!   the primary completion signal.
 //! - Multiple Codex sessions are treated as one logical agent stream.
 //!
-//! Plugin future: Phase 4/5 can publish the same hook table as an official
-//! Codex plugin by bundling `hooks/hooks.json` (or a `.codex-plugin/plugin.json`
-//! manifest `hooks` entry) — the lifecycle mapping in [`HOOKS`] is reused
-//! unchanged.
+//! The same hook table can later back an official Codex plugin without
+//! changing the game or IPC layers.
 
 mod config;
 
@@ -138,7 +136,7 @@ pub fn uninstall() -> Result<(), String> {
     Ok(())
 }
 
-/// Prints the integration status (see the README for the output shape).
+/// Prints the integration status.
 pub fn status() {
     println!("Codex integration");
     println!();

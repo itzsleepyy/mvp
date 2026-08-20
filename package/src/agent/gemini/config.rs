@@ -436,7 +436,7 @@ mod tests {
             .unwrap()
             .filter_map(|e| e.ok())
             .map(|e| e.file_name().to_string_lossy().into_owned())
-            .filter(|n| n.starts_with("settings.json.ws-backup-"))
+            .filter(|n| n.starts_with("settings.json.mvp-backup-"))
             .collect();
         assert_eq!(backups.len(), 1, "exactly one backup expected");
     }

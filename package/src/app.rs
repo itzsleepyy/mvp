@@ -587,7 +587,7 @@ impl App {
         }
     }
 
-    /// Mutable access for tests (spawning obstacles, forcing chips, ...).
+    /// Mutable access for tests that need to force a game state.
     #[cfg(test)]
     pub(crate) fn game_mut(&mut self) -> Option<&mut ActiveGame> {
         self.game.as_mut()

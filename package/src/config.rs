@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -40,7 +40,7 @@ struct HighScoreData {
 /// "MVP of the day": whoever beat everyone else's best that day.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DailyMvp {
-    /// The local day (YYYY-MM-DD) this MVP was set for.
+    /// The UTC day (YYYY-MM-DD) this MVP was set for.
     pub date: String,
     /// The player's name.
     pub name: String,
@@ -276,15 +276,22 @@ fn platform_path() -> Option<PathBuf> {
 }
 
 /// Copies a pre-rebrand config file into the MVP directory when the new
-/// location does not exist yet. Never overwrites.
+/// location does not exist yet. Uses create-new semantics so it never
+/// overwrites MVP data, even when two processes migrate concurrently.
 fn migrate_from_legacy(new: &Path, legacy: &Path) {
-    if new.exists() || !legacy.exists() {
+    let Ok(mut source) = fs::File::open(legacy) else {
         return;
-    }
+    };
     if let Some(parent) = new.parent() {
         let _ = fs::create_dir_all(parent);
     }
-    let _ = fs::copy(legacy, new);
+    let Ok(mut destination) = OpenOptions::new().write(true).create_new(true).open(new) else {
+        return;
+    };
+    if std::io::copy(&mut source, &mut destination).is_err() {
+        drop(destination);
+        let _ = fs::remove_file(new);
+    }
 }
 
 /// Days since the Unix epoch — the stable "today" index used to seed the
@@ -297,7 +304,7 @@ pub fn today_ordinal() -> u64 {
         .unwrap_or(0)
 }
 
-/// The local day as YYYY-MM-DD, from the civil-date algorithm (Howard
+/// The UTC day as YYYY-MM-DD, from the civil-date algorithm (Howard
 /// Hinnant's `civil_from_days`). No external date dependency needed.
 fn today_key() -> String {
     let days = today_ordinal() as i64;
@@ -594,6 +601,23 @@ mod tests {
             "Old",
             "daily MVP must migrate"
         );
+        assert_eq!(
+            fs::read_to_string(legacy_dir.join(FILE_NAME)).unwrap(),
+            r#"{"high_score": 1234}"#,
+            "migration must not modify legacy data"
+        );
+
+        migrate_from_legacy(&new_dir.join(FILE_NAME), &legacy_dir.join(FILE_NAME));
+        migrate_from_legacy(
+            &new_dir.join(MVP_FILE_NAME),
+            &legacy_dir.join(MVP_FILE_NAME),
+        );
+        assert_eq!(
+            HighScoreStore::load_at(new_dir.join(FILE_NAME), new_dir.join(MVP_FILE_NAME))
+                .high_score(),
+            1_234,
+            "repeated migration must be a no-op"
+        );
 
         let _ = fs::remove_dir_all(&legacy_dir);
         let _ = fs::remove_dir_all(&new_dir);
@@ -609,6 +633,36 @@ mod tests {
 
         migrate_from_legacy(&new, &legacy);
         assert_eq!(HighScoreStore::load(&new).high_score(), 999);
+        clean(&new);
+        clean(&legacy);
+    }
+
+    #[test]
+    fn migration_handles_each_legacy_file_independently() {
+        let legacy = temp_path("partial_legacy.json");
+        let new = temp_path("partial_new.json");
+        clean(&legacy);
+        clean(&new);
+        fs::write(&legacy, r#"{"high_score": 12}"#).unwrap();
+        fs::write(
+            legacy.with_file_name(MVP_FILE_NAME),
+            r#"{"mvp": {"date": "2026-08-19", "name": "Legacy", "score": 42, "game": "stack-jump"}}"#,
+        )
+        .unwrap();
+        fs::write(new.with_file_name(MVP_FILE_NAME), "newer MVP data").unwrap();
+
+        migrate_from_legacy(&new, &legacy);
+        migrate_from_legacy(
+            &new.with_file_name(MVP_FILE_NAME),
+            &legacy.with_file_name(MVP_FILE_NAME),
+        );
+
+        assert_eq!(HighScoreStore::load(&new).high_score(), 12);
+        assert_eq!(
+            fs::read_to_string(new.with_file_name(MVP_FILE_NAME)).unwrap(),
+            "newer MVP data",
+            "an existing MVP file must never be replaced"
+        );
         clean(&new);
         clean(&legacy);
     }

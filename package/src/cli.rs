@@ -171,6 +171,7 @@ pub fn parse_agent_event_args(args: &[String]) -> Result<(AgentKind, AgentEvent)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::CommandFactory;
 
     fn parse(args: &[&str]) -> Cli {
         Cli::try_parse_from(args).expect("args should parse")
@@ -182,6 +183,15 @@ mod tests {
         assert!(cli.agent.is_none());
         assert!(cli.command.is_none());
         assert!(!cli.no_auto_resume);
+    }
+
+    #[test]
+    fn cli_name_and_help_use_mvp_branding() {
+        let mut command = Cli::command();
+        assert_eq!(command.get_name(), "mvp");
+        let help = command.render_long_help().to_string();
+        assert!(help.contains("Most Valued Programmer"));
+        assert!(!help.to_ascii_lowercase().contains("waitstate"));
     }
 
     #[test]

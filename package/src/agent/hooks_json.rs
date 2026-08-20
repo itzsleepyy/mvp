@@ -39,7 +39,7 @@ pub fn shell_quote(s: &str) -> String {
 }
 
 /// The file name of a shell command's first token, tolerating Windows
-/// (`\`) and unix (`/`) separators: "C:\Tools\waitstate.exe" → "waitstate.exe".
+/// (`\`) and unix (`/`) separators: "C:\Tools\mvp.exe" becomes "mvp.exe".
 pub fn command_binary_name(first_token: &str) -> &str {
     first_token
         .rsplit(['/', '\\'])
@@ -187,7 +187,7 @@ impl HooksJson {
                 .unwrap_or("config");
             let backup = self
                 .path
-                .with_file_name(format!("{file_name}.ws-backup-{stamp}"));
+                .with_file_name(format!("{file_name}.mvp-backup-{stamp}"));
             std::fs::copy(&self.path, &backup).map_err(|e| {
                 format!(
                     "cannot back up {} to {}: {e}",
@@ -203,7 +203,7 @@ impl HooksJson {
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("config");
-        let tmp = self.path.with_file_name(format!("{file_name}.ws-tmp"));
+        let tmp = self.path.with_file_name(format!("{file_name}.mvp-tmp"));
         std::fs::write(&tmp, json).map_err(|e| format!("cannot write {}: {e}", tmp.display()))?;
         std::fs::rename(&tmp, &self.path)
             .map_err(|e| format!("cannot write {}: {e}", self.path.display()))?;
