@@ -6,15 +6,11 @@ use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 /// here so game logic never depends on crossterm types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppInput {
-    /// ENTER — confirm selection / start game.
+    /// ENTER — confirm selection / submit.
     Confirm,
-    /// SPACE — jump.
+    /// SPACE — drop the block (Stack Overflow).
     Jump,
-    /// H — hit (Twenty One).
-    Hit,
-    /// S — stand (Twenty One).
-    Stand,
-    /// ↑ — navigate menus; jumps while playing.
+    /// ↑ — navigate menus; drops the block while playing.
     Up,
     /// ↓ — navigate menus.
     Down,
@@ -26,9 +22,9 @@ pub enum AppInput {
     Back,
     /// N — open the name prompt from the menu.
     Rename,
-    /// A printable character typed into the name prompt.
+    /// A printable character typed into the name prompt or a game.
     Text(char),
-    /// Backspace in the name prompt.
+    /// Backspace in the name prompt or a game.
     Backspace,
     /// Q or Ctrl+C — quit the application.
     Quit,
@@ -42,9 +38,9 @@ const POLL_INTERVAL: Duration = Duration::from_millis(16);
 /// Waits briefly for the next terminal event. Returns `None` when the poll
 /// window elapses so the caller can tick the simulation and render a frame.
 ///
-/// With `text_mode` set (name prompt), printable characters become
-/// [`AppInput::Text`], so names like "Sam" or "Hugh" are typeable even
-/// though S, H and P mean something in a game.
+/// With `text_mode` set (name prompt, text-driven games), printable
+/// characters become [`AppInput::Text`], so names like "Sam" or "Hugh" are
+/// typeable and daily challenges accept typed letters.
 pub fn next_input(text_mode: bool) -> std::io::Result<Option<AppInput>> {
     if !event::poll(POLL_INTERVAL)? {
         return Ok(None);
@@ -73,14 +69,12 @@ fn key_to_input(key: event::KeyEvent, text_mode: bool) -> Option<AppInput> {
             _ => None,
         };
     }
-    // Repeats are accepted for continuous actions (holding SPACE re-jumps on
+    // Repeats are accepted for continuous actions (holding SPACE re-drops on
     // landing); discrete actions only respond to an initial press.
     let press = key.kind == KeyEventKind::Press;
     match key.code {
         KeyCode::Enter => Some(AppInput::Confirm),
         KeyCode::Char(' ') => Some(AppInput::Jump),
-        KeyCode::Char('h') | KeyCode::Char('H') => press.then_some(AppInput::Hit),
-        KeyCode::Char('s') | KeyCode::Char('S') => press.then_some(AppInput::Stand),
         KeyCode::Up => press.then_some(AppInput::Up),
         KeyCode::Down => press.then_some(AppInput::Down),
         KeyCode::Char('p') | KeyCode::Char('P') => press.then_some(AppInput::TogglePause),
@@ -138,26 +132,6 @@ mod tests {
         );
         assert_eq!(key_to_input(release(KeyCode::Up), false), None);
         assert_eq!(key_to_input(release(KeyCode::Down), false), None);
-    }
-
-    #[test]
-    fn h_and_s_drive_twenty_one() {
-        assert_eq!(
-            key_to_input(key(KeyCode::Char('h'), KeyModifiers::NONE), false),
-            Some(AppInput::Hit)
-        );
-        assert_eq!(
-            key_to_input(key(KeyCode::Char('H'), KeyModifiers::NONE), false),
-            Some(AppInput::Hit)
-        );
-        assert_eq!(
-            key_to_input(key(KeyCode::Char('s'), KeyModifiers::NONE), false),
-            Some(AppInput::Stand)
-        );
-        assert_eq!(
-            key_to_input(key(KeyCode::Char('S'), KeyModifiers::NONE), false),
-            Some(AppInput::Stand)
-        );
     }
 
     #[test]
@@ -238,7 +212,7 @@ mod tests {
         assert_eq!(
             key_to_input(key(KeyCode::Char('s'), KeyModifiers::NONE), true),
             Some(AppInput::Text('s')),
-            "S must be typeable even though it stands in a game"
+            "S must be typeable in text mode"
         );
         assert_eq!(
             key_to_input(key(KeyCode::Char('A'), KeyModifiers::NONE), true),

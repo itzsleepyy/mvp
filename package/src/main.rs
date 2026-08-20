@@ -154,7 +154,7 @@ fn run(
                 app.handle_agent_event(kind, event);
             }
         }
-        while let Some(input) = event::next_input(app.state == app::AppState::NamePrompt)? {
+        while let Some(input) = event::next_input(app.text_mode())? {
             app.handle_input(input);
             if app.should_quit() {
                 break;

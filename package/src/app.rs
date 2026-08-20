@@ -115,8 +115,6 @@ impl App {
                 AppState::PausedManual => {}
             },
             AppInput::Jump => self.playing_game_input(GameInput::Jump),
-            AppInput::Hit => self.playing_game_input(GameInput::Hit),
-            AppInput::Stand => self.playing_game_input(GameInput::Stand),
             AppInput::Up => match self.state {
                 AppState::GameMenu => self.move_selection(-1),
                 AppState::Playing => self.game_input(GameInput::Jump),
@@ -138,16 +136,18 @@ impl App {
                     self.open_name_prompt();
                 }
             }
-            AppInput::Text(c) => {
-                if self.state == AppState::NamePrompt {
-                    self.type_name(c);
-                }
-            }
-            AppInput::Backspace => {
-                if self.state == AppState::NamePrompt {
+            AppInput::Text(c) => match self.state {
+                AppState::NamePrompt => self.type_name(c),
+                AppState::Playing => self.game_input(GameInput::Type(c)),
+                _ => {}
+            },
+            AppInput::Backspace => match self.state {
+                AppState::NamePrompt => {
                     self.name_buffer.pop();
                 }
-            }
+                AppState::Playing => self.game_input(GameInput::Backspace),
+                _ => {}
+            },
             AppInput::Back => match self.state {
                 AppState::Menu => {}
                 AppState::NamePrompt => self.dismiss_name_prompt(),
@@ -168,10 +168,22 @@ impl App {
         self.start_game_of(self.selected_kind());
     }
 
-    /// Starts a specific game with a fresh seed.
+    /// Starts a specific game. Daily challenges are seeded from the day so
+    /// everyone plays the same word and the same bug; everything else gets
+    /// a fresh random seed.
     pub fn start_game_of(&mut self, kind: GameKind) {
         let (cols, rows) = self.playfield_dims();
-        self.game = Some(ActiveGame::new(kind, rand::random::<u64>(), cols, rows));
+        let seed = if kind.is_daily() {
+            crate::config::today_ordinal()
+        } else {
+            rand::random::<u64>()
+        };
+        self.game = Some(if kind == GameKind::DailyPr {
+            let progress = self.store.daily_pr_progress(seed).cloned();
+            ActiveGame::DailyPr(crate::game::daily_pr::DailyPr::restore(seed, progress))
+        } else {
+            ActiveGame::new(kind, seed, cols, rows)
+        });
         self.new_record = false;
         self.mvp_just_set = false;
         self.state = AppState::Playing;
@@ -184,7 +196,11 @@ impl App {
             .as_ref()
             .map(ActiveGame::kind)
             .unwrap_or_else(|| self.selected_kind());
-        self.start_game_of(kind);
+        if kind == GameKind::DailyPr {
+            self.back_to_menu();
+        } else {
+            self.start_game_of(kind);
+        }
     }
 
     fn move_selection(&mut self, delta: i64) {
@@ -244,10 +260,12 @@ impl App {
         self.state = AppState::Menu;
     }
 
-    /// Dismisses the prompt, keeping whatever was typed (or the fallback
-    /// anonymous name).
+    /// Cancels a rename. The first-run prompt cannot be dismissed until a
+    /// non-empty name has been saved.
     fn dismiss_name_prompt(&mut self) {
-        self.store.set_player_name(&self.name_buffer);
+        if !self.store.has_player_name() {
+            return;
+        }
         self.name_buffer.clear();
         self.state = AppState::Menu;
     }
@@ -265,11 +283,13 @@ impl App {
     }
 
     pub fn back_to_menu(&mut self) {
+        self.persist_daily_pr();
         self.state = AppState::Menu;
         self.game = None;
     }
 
     pub fn quit(&mut self) {
+        self.persist_daily_pr();
         self.should_quit = true;
     }
 
@@ -286,6 +306,19 @@ impl App {
     fn game_input(&mut self, input: GameInput) {
         if let Some(game) = &mut self.game {
             game.handle_input(input);
+        }
+        if input == GameInput::Confirm {
+            self.persist_daily_pr();
+        }
+    }
+
+    fn persist_daily_pr(&mut self) {
+        let progress = match self.game.as_ref() {
+            Some(ActiveGame::DailyPr(game)) => Some(game.progress()),
+            _ => None,
+        };
+        if let Some(progress) = progress {
+            self.store.set_daily_pr_progress(progress);
         }
     }
 
@@ -499,10 +532,13 @@ impl App {
             .game
             .as_ref()
             .map(ActiveGame::kind)
-            .unwrap_or(GameKind::StackJump);
+            .unwrap_or(GameKind::StackOverflow);
+        let note = self.game.as_ref().and_then(ActiveGame::score_note);
         let name = self.player_name().to_string();
         self.new_record = self.store.record(kind, score);
-        self.mvp_just_set = self.store.record_daily_mvp(&name, kind, score);
+        self.mvp_just_set = self
+            .store
+            .record_daily_mvp(&name, kind, score, note.as_deref());
         self.state = AppState::GameOver;
     }
 
@@ -538,6 +574,17 @@ impl App {
 
     pub fn game(&self) -> Option<&ActiveGame> {
         self.game.as_ref()
+    }
+
+    /// Whether the event loop should treat keystrokes as text. True for the
+    /// name prompt and for games that are driven by typed input (The Daily
+    /// PR, The Daily Fix).
+    pub fn text_mode(&self) -> bool {
+        match self.state {
+            AppState::NamePrompt => true,
+            AppState::Playing => self.game.as_ref().is_some_and(ActiveGame::text_input),
+            _ => false,
+        }
     }
 
     /// Mutable access for tests (spawning obstacles, forcing chips, ...).
@@ -594,50 +641,9 @@ impl App {
     }
 
     #[cfg(test)]
-    pub(crate) fn spawn_test_obstacle(&mut self) {
-        use crate::game::obstacle::{Obstacle, ObstacleKind};
-        if let Some(ActiveGame::StackJump(game)) = &mut self.game {
-            game.world
-                .obstacles
-                .push(Obstacle::new(0.5, ObstacleKind::Small));
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn force_test_chips(&mut self, chips: u64) {
-        if let Some(ActiveGame::TwentyOne(game)) = &mut self.game {
-            game.force_chips(chips);
-        }
-    }
-
-    /// Test hook: deals a deterministic, natural-free hand to a running
-    /// Twenty One game, so render tests never depend on shuffle order.
-    #[cfg(test)]
-    pub(crate) fn setup_test_twenty_one_hands(&mut self) {
-        use crate::game::twenty_one::{Card, Rank, Suit};
-        if let Some(ActiveGame::TwentyOne(game)) = &mut self.game {
-            game.debug_set_hands(
-                vec![
-                    Card {
-                        rank: Rank::Two,
-                        suit: Suit::Clubs,
-                    },
-                    Card {
-                        rank: Rank::Three,
-                        suit: Suit::Hearts,
-                    },
-                ],
-                vec![
-                    Card {
-                        rank: Rank::Ten,
-                        suit: Suit::Spades,
-                    },
-                    Card {
-                        rank: Rank::Six,
-                        suit: Suit::Diamonds,
-                    },
-                ],
-            );
+    pub(crate) fn debug_force_overflow(&mut self) {
+        if let Some(ActiveGame::StackOverflow(game)) = &mut self.game {
+            game.debug_force_overflow();
         }
     }
 }
@@ -645,7 +651,6 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::game::obstacle::{Obstacle, ObstacleKind};
 
     const C: AgentKind = AgentKind::ClaudeCode;
     const X: AgentKind = AgentKind::Codex;
@@ -684,16 +689,56 @@ mod tests {
         app
     }
 
-    fn collide(app: &mut App) {
-        let obstacle = Obstacle::new(0.5, ObstacleKind::Small);
-        app.game
+    /// Drops the stacker block dead-center: a perfect, scoring drop.
+    fn perfect_drop(app: &mut App) {
+        app.game_mut()
             .as_mut()
             .unwrap()
-            .as_stack_jump_mut()
+            .as_stack_overflow_mut()
             .unwrap()
-            .world
-            .obstacles
-            .push(obstacle);
+            .debug_set_block(0.0);
+        app.handle_input(AppInput::Jump);
+    }
+
+    /// Ends the stacker run without scoring (a full miss).
+    fn overflow(app: &mut App) {
+        app.debug_force_overflow();
+        app.tick(Duration::from_millis(16));
+    }
+
+    /// A scoring run: one perfect drop, then a full miss.
+    fn scored_run(app: &mut App) {
+        perfect_drop(app);
+        overflow(app);
+    }
+
+    /// Selects and starts a game from the game menu.
+    fn start_from_menu(app: &mut App, kind: GameKind) {
+        app.handle_input(AppInput::Confirm); // Menu → GameMenu
+        while app.selected_kind() != kind {
+            app.handle_input(AppInput::Down);
+        }
+        app.handle_input(AppInput::Confirm); // start
+    }
+
+    /// Types a word into the active Daily PR game and submits it, then lets
+    /// the app tick so a solve reaches the game-over state.
+    fn type_word(app: &mut App, word: &str) {
+        for c in word.chars() {
+            app.handle_input(AppInput::Text(c));
+        }
+        app.handle_input(AppInput::Confirm);
+        app.tick(Duration::from_millis(16));
+    }
+
+    /// Types a line into the active Daily Fix game and submits it, then
+    /// lets the app tick so a solve reaches the game-over state.
+    fn type_fix(app: &mut App, line: &str) {
+        for c in line.chars() {
+            app.handle_input(AppInput::Text(c));
+        }
+        app.handle_input(AppInput::Confirm);
+        app.tick(Duration::from_millis(16));
     }
 
     #[test]
@@ -712,12 +757,12 @@ mod tests {
         app.handle_input(AppInput::Confirm);
         assert_eq!(app.state, AppState::GameMenu);
         assert!(app.game().is_none());
-        assert_eq!(app.selected_kind(), GameKind::StackJump);
+        assert_eq!(app.selected_kind(), GameKind::StackOverflow);
 
         app.handle_input(AppInput::Confirm);
         assert_eq!(app.state, AppState::Playing);
         assert!(app.game().is_some());
-        assert_eq!(app.game().unwrap().kind(), GameKind::StackJump);
+        assert_eq!(app.game().unwrap().kind(), GameKind::StackOverflow);
     }
 
     #[test]
@@ -727,15 +772,21 @@ mod tests {
         assert_eq!(app.state, AppState::GameMenu);
 
         app.handle_input(AppInput::Down);
-        assert_eq!(app.selected_kind(), GameKind::TwentyOne);
+        assert_eq!(app.selected_kind(), GameKind::DailyPr);
         app.handle_input(AppInput::Down);
-        assert_eq!(app.selected_kind(), GameKind::StackJump, "selection wraps");
+        assert_eq!(app.selected_kind(), GameKind::DailyFix);
+        app.handle_input(AppInput::Down);
+        assert_eq!(
+            app.selected_kind(),
+            GameKind::StackOverflow,
+            "selection wraps"
+        );
         app.handle_input(AppInput::Up);
-        assert_eq!(app.selected_kind(), GameKind::TwentyOne, "up also wraps");
+        assert_eq!(app.selected_kind(), GameKind::DailyFix, "up also wraps");
 
         app.handle_input(AppInput::Confirm);
         assert_eq!(app.state, AppState::Playing);
-        assert_eq!(app.game().unwrap().kind(), GameKind::TwentyOne);
+        assert_eq!(app.game().unwrap().kind(), GameKind::DailyFix);
     }
 
     #[test]
@@ -765,21 +816,21 @@ mod tests {
     }
 
     #[test]
-    fn score_grows_while_playing_and_stops_when_paused() {
+    fn the_run_clock_grows_while_playing_and_stops_when_paused() {
         let mut app = playing_app();
         app.tick(Duration::from_secs(1));
-        let after_first = app.game().unwrap().score();
-        assert!(after_first > 0);
+        let after_first = app.game().unwrap().elapsed();
+        assert!(after_first > 0.0);
 
         app.pause();
         assert_eq!(app.state, AppState::PausedManual);
         app.tick(Duration::from_secs(1));
-        assert_eq!(app.game().unwrap().score(), after_first);
+        assert_eq!(app.game().unwrap().elapsed(), after_first);
 
         app.resume();
         assert_eq!(app.state, AppState::Playing);
         app.tick(Duration::from_secs(1));
-        assert!(app.game().unwrap().score() > after_first);
+        assert!(app.game().unwrap().elapsed() > after_first);
     }
 
     #[test]
@@ -792,66 +843,60 @@ mod tests {
     }
 
     #[test]
-    fn jump_input_reaches_the_game_only_while_playing() {
+    fn drop_input_reaches_the_game_only_while_playing() {
         let mut app = playing_app();
+        app.game_mut()
+            .as_mut()
+            .unwrap()
+            .as_stack_overflow_mut()
+            .unwrap()
+            .debug_set_block(3.0);
         app.handle_input(AppInput::Jump);
-        assert!(
-            !app.game()
-                .unwrap()
-                .as_stack_jump()
-                .unwrap()
-                .render_state()
-                .player
-                .grounded
+        assert_eq!(
+            app.game().unwrap().as_stack_overflow().unwrap().height(),
+            2,
+            "SPACE must drop a block while playing"
         );
 
         app.pause();
-        let player = *app
-            .game()
-            .unwrap()
-            .as_stack_jump()
-            .unwrap()
-            .render_state()
-            .player;
+        let height = app.game().unwrap().as_stack_overflow().unwrap().height();
         app.handle_input(AppInput::Jump);
         assert_eq!(
-            *app.game()
-                .unwrap()
-                .as_stack_jump()
-                .unwrap()
-                .render_state()
-                .player,
-            player
+            app.game().unwrap().as_stack_overflow().unwrap().height(),
+            height,
+            "SPACE must not drop while paused"
         );
     }
 
     #[test]
-    fn up_jumps_while_playing_and_navigates_the_game_menu() {
+    fn up_drops_while_playing_and_navigates_the_game_menu() {
         let mut app = playing_app();
+        app.game_mut()
+            .as_mut()
+            .unwrap()
+            .as_stack_overflow_mut()
+            .unwrap()
+            .debug_set_block(3.0);
         app.handle_input(AppInput::Up);
-        assert!(
-            !app.game()
-                .unwrap()
-                .as_stack_jump()
-                .unwrap()
-                .render_state()
-                .player
-                .grounded
+        assert_eq!(
+            app.game().unwrap().as_stack_overflow().unwrap().height(),
+            2,
+            "Up must drop a block while playing"
         );
 
         let mut menu = app_with_size(temp_store("up.json"), 100, 30);
         menu.handle_input(AppInput::Confirm);
         assert_eq!(menu.state, AppState::GameMenu);
         menu.handle_input(AppInput::Up);
-        assert_eq!(menu.selected_kind(), GameKind::TwentyOne);
+        assert_eq!(menu.selected_kind(), GameKind::DailyFix);
     }
 
     #[test]
-    fn collision_causes_game_over_and_records_high_score() {
+    fn overflow_causes_game_over_and_records_high_score() {
         let mut app = playing_app();
         app.tick(Duration::from_secs(1));
-        collide(&mut app);
-        app.tick(Duration::from_millis(16));
+        perfect_drop(&mut app);
+        overflow(&mut app);
 
         assert_eq!(app.state, AppState::GameOver);
         let score = app.game().unwrap().score();
@@ -862,9 +907,7 @@ mod tests {
     #[test]
     fn restart_starts_a_fresh_run() {
         let mut app = playing_app();
-        app.tick(Duration::from_secs(1));
-        collide(&mut app);
-        app.tick(Duration::from_millis(16));
+        scored_run(&mut app);
         let best = app.best_score();
         assert!(best > 0);
 
@@ -878,14 +921,11 @@ mod tests {
     #[test]
     fn lower_score_does_not_replace_best() {
         let mut app = playing_app();
-        app.tick(Duration::from_secs(2));
-        collide(&mut app);
-        app.tick(Duration::from_millis(16));
+        scored_run(&mut app);
         let best = app.best_score();
 
         app.start_game();
-        collide(&mut app); // immediate death: score ~0
-        app.tick(Duration::from_millis(16));
+        overflow(&mut app); // immediate miss: score 0
         assert_eq!(app.best_score(), best);
         assert!(!app.is_new_record());
     }
@@ -908,8 +948,7 @@ mod tests {
         assert_eq!(agent_paused.state, AppState::Menu);
 
         let mut over = playing_app();
-        collide(&mut over);
-        over.tick(Duration::from_millis(16));
+        overflow(&mut over);
         over.handle_input(AppInput::Back);
         assert_eq!(over.state, AppState::Menu);
     }
@@ -919,30 +958,31 @@ mod tests {
         let mut app = app_with_size(temp_store("small.json"), 100, 30);
         app.start_game();
         app.tick(Duration::from_secs(1));
-        let before = app.game().unwrap().score();
-        assert!(before > 0);
+        let before = app.game().unwrap().elapsed();
+        assert!(before > 0.0);
 
         app.set_terminal_size(42, 14);
         assert!(app.too_small());
         app.tick(Duration::from_secs(1));
-        assert_eq!(app.game().unwrap().score(), before);
+        assert_eq!(app.game().unwrap().elapsed(), before);
 
         app.set_terminal_size(100, 30);
         assert!(!app.too_small());
         app.tick(Duration::from_secs(1));
-        assert!(app.game().unwrap().score() > before);
+        assert!(app.game().unwrap().elapsed() > before);
     }
 
     #[test]
-    fn resize_updates_game_viewport() {
+    fn resize_recenters_the_stack() {
         let mut app = playing_app();
         app.set_terminal_size(120, 40);
-        let (cols, rows) = ui::playfield_dims(120, 40);
+        let (cols, _) = ui::playfield_dims(120, 40);
+        let game = app.game().unwrap().as_stack_overflow().unwrap();
         assert_eq!(
-            app.game().unwrap().as_stack_jump().unwrap().world.spawn_x,
-            f64::from(cols - crate::game::player_col(cols)) + 1.0
+            game.layers()[0].left,
+            (i32::from(cols) - crate::game::stack_overflow::START_WIDTH) / 2,
+            "the tower must recenter in the wider playfield"
         );
-        assert_eq!(rows, ui::playfield_dims(120, 40).1);
     }
 
     #[test]
@@ -959,9 +999,7 @@ mod tests {
 
         let mut first = app_with_size(HighScoreStore::load(&path), 100, 30);
         first.start_game();
-        first.tick(Duration::from_secs(3));
-        collide(&mut first);
-        first.tick(Duration::from_millis(16));
+        scored_run(&mut first);
         let best = first.best_score();
         assert!(best > 0);
 
@@ -1004,8 +1042,7 @@ mod tests {
     #[test]
     fn game_over_is_not_disturbed_by_agent_events() {
         let mut app = playing_app();
-        collide(&mut app);
-        app.tick(Duration::from_millis(16));
+        overflow(&mut app);
         assert_eq!(app.state, AppState::GameOver);
         app.handle_agent_event(C, AgentEvent::Working);
         assert_eq!(app.state, AppState::GameOver);
@@ -1090,17 +1127,14 @@ mod tests {
 
     #[test]
     fn agent_pause_preserves_the_whole_run() {
-        use crate::game::obstacle::Obstacle;
-        use crate::game::player::Player;
-
-        fn snapshot(app: &App) -> (u64, f64, Player, Vec<Obstacle>, f64) {
-            let game = app.game().unwrap().as_stack_jump().unwrap();
+        fn snapshot(app: &App) -> (u64, f64, Vec<crate::game::stack_overflow::Layer>, f64, i32) {
+            let game = app.game().unwrap().as_stack_overflow().unwrap();
             (
                 game.score(),
                 game.elapsed(),
-                *game.render_state().player,
-                game.world.obstacles.clone(),
-                game.speed_multiplier(),
+                game.layers().to_vec(),
+                game.block_offset(),
+                game.direction(),
             )
         }
 
@@ -1117,7 +1151,7 @@ mod tests {
         assert_eq!(
             snapshot(&app),
             before,
-            "agent resume must not reset score, player, obstacles or difficulty"
+            "agent resume must not reset score, layers or the block"
         );
     }
 
@@ -1347,8 +1381,7 @@ mod tests {
     #[test]
     fn game_over_survives_multi_agent_lifecycle() {
         let mut app = playing_app();
-        collide(&mut app);
-        app.tick(Duration::from_millis(16));
+        overflow(&mut app);
         assert_eq!(app.state, AppState::GameOver);
         app.handle_agent_event(C, AgentEvent::Working);
         app.handle_agent_event(X, AgentEvent::NeedsInput);
@@ -1409,169 +1442,187 @@ mod tests {
         assert!(app.agents().get(&G).is_none());
     }
 
-    // ---- Twenty One ---------------------------------------------------------
+    // ---- daily challenges ---------------------------------------------------
 
-    use crate::game::twenty_one::{Card, Phase, Rank, Suit};
-
-    fn card(rank: Rank, suit: Suit) -> Card {
-        Card { rank, suit }
+    fn daily_pr_app(name: &str) -> App {
+        let mut app = app_with_size(temp_store(name), 100, 30);
+        start_from_menu(&mut app, GameKind::DailyPr);
+        app
     }
 
-    fn twenty_one_app(name: &str) -> App {
+    fn daily_fix_app(name: &str) -> App {
         let mut app = app_with_size(temp_store(name), 100, 30);
-        app.handle_input(AppInput::Confirm); // Menu → GameMenu
-        app.handle_input(AppInput::Down); // select Twenty One
-        app.handle_input(AppInput::Confirm); // start
+        start_from_menu(&mut app, GameKind::DailyFix);
         app
     }
 
     #[test]
-    fn twenty_one_is_reachable_from_the_game_menu() {
-        let app = twenty_one_app("reach.json");
+    fn daily_pr_is_reachable_and_typed_input_reaches_it() {
+        let mut app = daily_pr_app("prreach.json");
         assert_eq!(app.state, AppState::Playing);
-        assert_eq!(app.game().unwrap().kind(), GameKind::TwentyOne);
+        assert_eq!(app.game().unwrap().kind(), GameKind::DailyPr);
+        assert!(app.text_mode(), "Daily PR is a text-driven game");
+
+        let word = app.game().unwrap().as_daily_pr().unwrap().word();
+        type_word(&mut app, &word);
+        assert_eq!(app.state, AppState::GameOver, "the word must solve the PR");
+        assert!(app.best_score_for(GameKind::DailyPr) > 0);
     }
 
     #[test]
-    fn hit_and_stand_reach_the_twenty_one_game() {
-        let mut app = twenty_one_app("input.json");
-        app.game
-            .as_mut()
-            .unwrap()
-            .as_twenty_one_mut()
-            .unwrap()
-            .debug_set_hands(
-                vec![
-                    card(Rank::Two, Suit::Clubs),
-                    card(Rank::Three, Suit::Hearts),
-                ],
-                vec![
-                    card(Rank::Ten, Suit::Spades),
-                    card(Rank::Ten, Suit::Diamonds),
-                ],
-            );
-        assert_eq!(
-            app.game().unwrap().as_twenty_one().unwrap().phase(),
-            Phase::PlayerTurn
-        );
-
-        app.handle_input(AppInput::Hit);
-        let cards = app
-            .game()
-            .unwrap()
-            .as_twenty_one()
-            .unwrap()
-            .player_hand()
-            .len();
-        assert_eq!(cards, 3, "H must deal one card");
-
-        app.handle_input(AppInput::Stand);
-        let game = app.game().unwrap().as_twenty_one().unwrap();
-        assert_eq!(game.phase(), Phase::RoundOver, "S must settle the round");
-
-        // ENTER deals the next round (hands reset to two cards each).
-        app.handle_input(AppInput::Confirm);
-        let game = app.game().unwrap().as_twenty_one().unwrap();
-        assert_eq!(game.player_hand().len(), 2);
-        assert_eq!(game.dealer_hand().len(), 2);
-    }
-
-    #[test]
-    fn twenty_one_ignores_jump_and_stacks_do_not_hit() {
-        let mut app = twenty_one_app("mixed.json");
-        app.game
-            .as_mut()
-            .unwrap()
-            .as_twenty_one_mut()
-            .unwrap()
-            .debug_set_hands(
-                vec![
-                    card(Rank::Four, Suit::Clubs),
-                    card(Rank::Five, Suit::Hearts),
-                ],
-                vec![
-                    card(Rank::Ten, Suit::Spades),
-                    card(Rank::Six, Suit::Diamonds),
-                ],
-            );
-        app.handle_input(AppInput::Jump);
-        app.handle_input(AppInput::Up);
-        let game = app.game().unwrap().as_twenty_one().unwrap();
-        assert_eq!(game.phase(), Phase::PlayerTurn, "jump must not settle 21");
-        assert_eq!(game.player_hand().len(), 2, "jump must not deal cards");
-
-        // A stack jump run ignores Twenty One inputs entirely.
-        let mut jump = playing_app();
-        jump.handle_input(AppInput::Hit);
-        jump.handle_input(AppInput::Stand);
-        jump.handle_input(AppInput::Confirm);
-        assert_eq!(jump.state, AppState::Playing);
-    }
-
-    #[test]
-    fn agent_pause_freezes_twenty_one() {
-        let mut app = twenty_one_app("freeze.json");
-        app.setup_test_twenty_one_hands(); // neutralize the opening deal
-        app.handle_agent_event(C, AgentEvent::NeedsInput);
-        assert_eq!(app.state, AppState::PausedAgent(PauseReason::NeedsInput));
-
-        let snapshot = {
-            let game = app.game().unwrap().as_twenty_one().unwrap();
-            (
-                game.chips(),
-                game.phase(),
-                game.player_hand().to_vec(),
-                game.dealer_hand().to_vec(),
-            )
-        };
-        app.tick(Duration::from_secs(2));
-        app.handle_input(AppInput::Hit);
-        app.handle_input(AppInput::Stand);
-        let game = app.game().unwrap().as_twenty_one().unwrap();
-        assert_eq!(
-            (
-                game.chips(),
-                game.phase(),
-                game.player_hand().to_vec(),
-                game.dealer_hand().to_vec()
-            ),
-            snapshot,
-            "agent pause must freeze the table and ignore game input"
-        );
-
-        app.handle_agent_event(C, AgentEvent::Working);
+    fn daily_fix_is_reachable_and_the_fix_line_solves_it() {
+        let mut app = daily_fix_app("fixreach.json");
         assert_eq!(app.state, AppState::Playing);
+        assert_eq!(app.game().unwrap().kind(), GameKind::DailyFix);
+        assert!(app.text_mode(), "Daily Fix is a text-driven game");
+
+        let fix = app.game().unwrap().as_daily_fix().unwrap().bug().fix;
+        type_fix(&mut app, fix);
+        assert_eq!(app.state, AppState::GameOver, "the fix must solve the run");
+        assert!(app.best_score_for(GameKind::DailyFix) > 0);
+    }
+
+    #[test]
+    fn daily_challenges_seed_from_today_for_everyone() {
+        let a = daily_pr_app("seed1.json");
+        let b = daily_pr_app("seed2.json");
         assert_eq!(
-            app.game().unwrap().as_twenty_one().unwrap().phase(),
-            Phase::PlayerTurn
+            a.game().unwrap().as_daily_pr().unwrap().word(),
+            b.game().unwrap().as_daily_pr().unwrap().word(),
+            "the whole world plays the same word"
+        );
+
+        let c = daily_fix_app("seed3.json");
+        let d = daily_fix_app("seed4.json");
+        assert_eq!(
+            c.game().unwrap().as_daily_fix().unwrap().bug(),
+            d.game().unwrap().as_daily_fix().unwrap().bug(),
+            "the whole world fixes the same bug"
         );
     }
 
     #[test]
-    fn twenty_one_game_over_records_the_best_and_restarts_the_same_game() {
-        let mut app = twenty_one_app("over.json");
-        app.setup_test_twenty_one_hands(); // no natural on the opening deal
-        app.game_mut()
-            .as_mut()
-            .unwrap()
-            .as_twenty_one_mut()
-            .unwrap()
-            .force_chips(crate::game::twenty_one::BET - 1);
-        app.handle_input(AppInput::Confirm); // cannot afford the next bet
-        assert!(app.game().unwrap().as_twenty_one().unwrap().is_game_over());
+    fn text_and_backspace_are_ignored_by_stack_overflow() {
+        let mut app = playing_app();
+        assert!(!app.text_mode(), "Stack Overflow is not text-driven");
+        let height = app.game().unwrap().as_stack_overflow().unwrap().height();
+        app.handle_input(AppInput::Text('x'));
+        app.handle_input(AppInput::Backspace);
+        assert_eq!(
+            app.game().unwrap().as_stack_overflow().unwrap().height(),
+            height
+        );
+    }
+
+    #[test]
+    fn daily_pr_best_of_the_day_keeps_the_fewest_guesses() {
+        let mut app = daily_pr_app("prbest.json");
+        let word = app.game().unwrap().as_daily_pr().unwrap().word();
+        type_word(&mut app, &word); // solved in 1
+        assert_eq!(app.state, AppState::GameOver);
+        let one_guess = app.best_score_for(GameKind::DailyPr);
+        let mvp = app.daily_mvp().unwrap();
+        assert_eq!(mvp.game_kind(), GameKind::DailyPr);
+        assert_eq!(mvp.note.as_deref(), Some("1 guesses"));
+
+        // A completed daily board cannot be restarted for another attempt.
+        app.handle_input(AppInput::Restart);
+        assert_eq!(app.state, AppState::Menu);
+        start_from_menu(&mut app, GameKind::DailyPr);
+        assert_eq!(
+            app.game().unwrap().as_daily_pr().unwrap().word(),
+            word,
+            "returning keeps today's word"
+        );
+        assert_eq!(app.game().unwrap().as_daily_pr().unwrap().guesses(), 1);
+        assert!(app.game().unwrap().as_daily_pr().unwrap().locked());
         app.tick(Duration::from_millis(16));
         assert_eq!(app.state, AppState::GameOver);
+        assert_eq!(app.best_score_for(GameKind::DailyPr), one_guess);
+        assert_eq!(app.daily_mvp().unwrap().name, "Anonymous");
+        assert!(!app.mvp_just_set(), "the same board must not crown twice");
+    }
+
+    #[test]
+    fn daily_pr_attempts_survive_leaving_and_restarting_the_app() {
+        let path = temp_dir("prprogress").join("highscore.json");
+        let mut app = app_with_size(HighScoreStore::load(&path), 100, 30);
+        start_from_menu(&mut app, GameKind::DailyPr);
+        let word = app.game().unwrap().as_daily_pr().unwrap().word();
+        let filler = crate::game::daily_pr::GUESSES
+            .iter()
+            .find(|guess| !guess.eq_ignore_ascii_case(&word))
+            .expect("a different word exists");
+        type_word(&mut app, filler);
+        assert_eq!(app.game().unwrap().as_daily_pr().unwrap().guesses(), 1);
+
+        app.handle_input(AppInput::Back);
+        start_from_menu(&mut app, GameKind::DailyPr);
         assert_eq!(
-            app.best_score_for(GameKind::TwentyOne),
-            crate::game::twenty_one::STARTING_CHIPS
+            app.game().unwrap().as_daily_pr().unwrap().guesses(),
+            1,
+            "leaving for the menu must not restore an attempt"
         );
 
+        drop(app);
+        let mut reopened = app_with_size(HighScoreStore::load(&path), 100, 30);
+        start_from_menu(&mut reopened, GameKind::DailyPr);
+        assert_eq!(
+            reopened.game().unwrap().as_daily_pr().unwrap().guesses(),
+            1,
+            "restarting MVP must not restore an attempt"
+        );
+    }
+
+    #[test]
+    fn daily_pr_failure_scores_zero_and_crowns_nobody() {
+        let mut app = daily_pr_app("prfail.json");
+        let word = app.game().unwrap().as_daily_pr().unwrap().word();
+        let filler = crate::game::daily_pr::GUESSES
+            .iter()
+            .find(|w| **w != word)
+            .expect("a different word exists");
+        for _ in 0..crate::game::daily_pr::MAX_GUESSES {
+            type_word(&mut app, filler);
+        }
+        assert_eq!(app.state, AppState::GameOver);
+        assert_eq!(
+            app.best_score_for(GameKind::DailyPr),
+            0,
+            "a DNF is no record"
+        );
+        assert_eq!(app.daily_mvp(), None, "a DNF must not crown the MVP");
+    }
+
+    #[test]
+    fn daily_fix_faster_fixes_win_the_day() {
+        let mut app = daily_fix_app("fixbest.json");
+        let fix = app.game().unwrap().as_daily_fix().unwrap().bug().fix;
+        type_fix(&mut app, fix); // solved fast
+        assert_eq!(app.state, AppState::GameOver);
+        let fast = app.best_score_for(GameKind::DailyFix);
+        assert!(fast > 0);
+        let mvp = app.daily_mvp().unwrap();
+        assert_eq!(mvp.game_kind(), GameKind::DailyFix);
+        assert!(mvp.note.as_deref().unwrap().starts_with("fixed in"));
+
+        // A slower solve must not dethrone the fast one.
         app.handle_input(AppInput::Restart);
         assert_eq!(app.state, AppState::Playing);
-        app.setup_test_twenty_one_hands(); // neutralize the fresh random deal
-        let game = app.game().unwrap().as_twenty_one().unwrap();
-        assert_eq!(game.chips(), crate::game::twenty_one::STARTING_CHIPS);
-        assert!(!game.is_game_over());
+        type_fix(&mut app, "definitely wrong");
+        type_fix(&mut app, fix); // same bug, penalized and slower
+        assert_eq!(app.state, AppState::GameOver);
+        assert_eq!(app.best_score_for(GameKind::DailyFix), fast);
+        assert!(!app.mvp_just_set());
+    }
+
+    #[test]
+    fn restarting_a_daily_fix_keeps_todays_bug() {
+        let mut app = daily_fix_app("fixrestart.json");
+        let bug = app.game().unwrap().as_daily_fix().unwrap().bug();
+        app.handle_input(AppInput::Back); // back to the menu
+        start_from_menu(&mut app, GameKind::DailyFix);
+        assert_eq!(app.game().unwrap().as_daily_fix().unwrap().bug(), bug);
     }
 
     // ---- name prompt --------------------------------------------------------
@@ -1596,6 +1647,22 @@ mod tests {
     }
 
     #[test]
+    fn player_name_is_remembered_across_app_sessions() {
+        let path = temp_dir("namesession").join("highscore.json");
+        let mut first = app_with_size(HighScoreStore::load(&path), 100, 30);
+        first.open_name_prompt();
+        for c in "Alex".chars() {
+            first.handle_input(AppInput::Text(c));
+        }
+        first.handle_input(AppInput::Confirm);
+        drop(first);
+
+        let second = app_with_size(HighScoreStore::load(&path), 100, 30);
+        assert!(second.has_player_name());
+        assert_eq!(second.player_name(), "Alex");
+    }
+
+    #[test]
     fn name_prompt_requires_a_non_empty_name() {
         let mut app = app_with_size(temp_store("emptyname.json"), 100, 30);
         app.open_name_prompt();
@@ -1609,20 +1676,26 @@ mod tests {
     }
 
     #[test]
-    fn name_prompt_esc_dismisses_with_what_was_typed() {
+    fn first_run_name_prompt_cannot_be_skipped_and_rename_can_be_cancelled() {
         let mut app = app_with_size(temp_store("escnone.json"), 100, 30);
         app.open_name_prompt();
         app.handle_input(AppInput::Back);
-        assert_eq!(app.state, AppState::Menu);
-        assert_eq!(app.player_name(), "Anonymous");
+        assert_eq!(app.state, AppState::NamePrompt);
+        assert!(!app.has_player_name());
+
+        for c in "Alex".chars() {
+            app.handle_input(AppInput::Text(c));
+        }
+        app.handle_input(AppInput::Confirm);
+        assert_eq!(app.player_name(), "Alex");
 
         app.open_name_prompt();
-        app.handle_input(AppInput::Text('S'));
-        app.handle_input(AppInput::Text('a'));
-        app.handle_input(AppInput::Text('m'));
+        for c in "Sam".chars() {
+            app.handle_input(AppInput::Text(c));
+        }
         app.handle_input(AppInput::Back);
         assert_eq!(app.state, AppState::Menu);
-        assert_eq!(app.player_name(), "Sam");
+        assert_eq!(app.player_name(), "Alex");
     }
 
     #[test]
@@ -1685,43 +1758,23 @@ mod tests {
     fn finishing_a_run_sets_the_daily_mvp_for_today() {
         let mut app = playing_app();
         assert!(!app.has_player_name());
-        app.tick(Duration::from_secs(1));
-        collide(&mut app);
-        app.tick(Duration::from_millis(16));
+        scored_run(&mut app);
         assert_eq!(app.state, AppState::GameOver);
         assert!(app.mvp_just_set());
         let mvp = app.daily_mvp().expect("daily mvp set");
         assert_eq!(mvp.name, "Anonymous");
-        assert_eq!(mvp.game_kind(), GameKind::StackJump);
+        assert_eq!(mvp.game_kind(), GameKind::StackOverflow);
     }
 
     #[test]
     fn a_lower_score_does_not_dethrone_the_daily_mvp() {
         let mut app = playing_app();
-        app.tick(Duration::from_secs(2));
-        collide(&mut app);
-        app.tick(Duration::from_millis(16));
+        scored_run(&mut app);
         let mvp_score = app.daily_mvp().unwrap().score;
 
         app.start_game();
-        collide(&mut app); // immediate death: score ~0
-        app.tick(Duration::from_millis(16));
+        overflow(&mut app); // immediate miss: score 0
         assert_eq!(app.daily_mvp().unwrap().score, mvp_score);
         assert!(!app.mvp_just_set());
-    }
-
-    #[test]
-    fn twenty_one_peak_chips_compete_for_the_daily_mvp() {
-        let mut app = twenty_one_app("mvp21.json");
-        app.game
-            .as_mut()
-            .unwrap()
-            .as_twenty_one_mut()
-            .unwrap()
-            .force_chips(crate::game::twenty_one::BET - 1);
-        app.handle_input(AppInput::Confirm);
-        app.tick(Duration::from_millis(16));
-        assert_eq!(app.state, AppState::GameOver);
-        assert_eq!(app.daily_mvp().unwrap().game_kind(), GameKind::TwentyOne);
     }
 }

@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::game::GameKind;
+use crate::game::daily_pr::DailyPrProgress;
 
 const FILE_NAME: &str = "highscore.json";
 const MVP_FILE_NAME: &str = "mvp_day.json";
@@ -29,6 +30,10 @@ struct HighScoreData {
     /// The player's chosen name; empty until the first-run prompt.
     #[serde(default)]
     player_name: String,
+    /// Submitted guesses for today's Daily PR. Keeping this beside scores
+    /// prevents restarting the app from restoring the attempt count.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    daily_pr: Option<DailyPrProgress>,
 }
 
 /// Who owns the best score on a given day, across all games. This is the
@@ -43,6 +48,10 @@ pub struct DailyMvp {
     pub score: u64,
     /// [`GameKind::id`] of the game the score was set in.
     pub game: String,
+    /// Human-readable result shown on the board (e.g. "3 guesses" or
+    /// "fixed in 0:42"), when the raw score is not meaningful on its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 impl DailyMvp {
@@ -52,7 +61,7 @@ impl DailyMvp {
             .iter()
             .find(|k| k.id() == self.game)
             .copied()
-            .unwrap_or(GameKind::StackJump)
+            .unwrap_or(GameKind::StackOverflow)
     }
 }
 
@@ -126,9 +135,15 @@ impl HighScoreStore {
     }
 
     /// Records `score` as the new best for `kind` if it beats the current
-    /// one. Persistence failures are ignored so storage problems never break
-    /// the game. Returns `true` when a new record was set.
+    /// one. Daily challenges normalize their raw metrics (guesses, time)
+    /// into higher-is-better scores, so one comparison serves every game.
+    /// Scores of zero are never a new best. Persistence failures are
+    /// ignored so storage problems never break the game. Returns `true`
+    /// when a new record was set.
     pub fn record(&mut self, kind: GameKind, score: u64) -> bool {
+        if score == 0 {
+            return false;
+        }
         let entry = self.data.games.entry(kind.id().to_string()).or_insert(0);
         if score <= *entry {
             return false;
@@ -180,6 +195,20 @@ impl HighScoreStore {
         self.save();
     }
 
+    // ---- daily challenge progress ----------------------------------------
+
+    pub fn daily_pr_progress(&self, day: u64) -> Option<&DailyPrProgress> {
+        self.data.daily_pr.as_ref().filter(|saved| saved.day == day)
+    }
+
+    pub fn set_daily_pr_progress(&mut self, progress: DailyPrProgress) {
+        if self.data.daily_pr.as_ref() == Some(&progress) {
+            return;
+        }
+        self.data.daily_pr = Some(progress);
+        self.save();
+    }
+
     // ---- daily MVP --------------------------------------------------------
 
     /// Today's MVP of the day, if a score has been set yet.
@@ -188,9 +217,21 @@ impl HighScoreStore {
     }
 
     /// Records `score` as today's MVP if it beats the current one for
-    /// today. A new day always replaces yesterday's MVP. Returns `true`
-    /// when this score became the MVP of the day.
-    pub fn record_daily_mvp(&mut self, name: &str, kind: GameKind, score: u64) -> bool {
+    /// today. A new day always replaces yesterday's MVP. Daily challenges
+    /// normalize their raw metrics into higher-is-better scores, so one
+    /// comparison serves every game; a zero score is a did-not-finish and
+    /// never crowns anyone. `note` is the human-readable result shown on
+    /// the board. Returns `true` when this score became the MVP of the day.
+    pub fn record_daily_mvp(
+        &mut self,
+        name: &str,
+        kind: GameKind,
+        score: u64,
+        note: Option<&str>,
+    ) -> bool {
+        if score == 0 {
+            return false;
+        }
         let today = today_key();
         let current = self.mvp_data.mvp.as_ref();
         if current.is_some_and(|m| m.date == today && m.score >= score) {
@@ -201,6 +242,7 @@ impl HighScoreStore {
             name: name.to_string(),
             score,
             game: kind.id().to_string(),
+            note: note.map(str::to_string),
         });
         self.save_mvp();
         true
@@ -245,13 +287,20 @@ fn migrate_from_legacy(new: &Path, legacy: &Path) {
     let _ = fs::copy(legacy, new);
 }
 
+/// Days since the Unix epoch — the stable "today" index used to seed the
+/// daily challenges. Same value for everyone on a given day, so the whole
+/// world plays the same word and the same bug.
+pub fn today_ordinal() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() / 86_400)
+        .unwrap_or(0)
+}
+
 /// The local day as YYYY-MM-DD, from the civil-date algorithm (Howard
 /// Hinnant's `civil_from_days`). No external date dependency needed.
 fn today_key() -> String {
-    let days = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64 / 86_400)
-        .unwrap_or(0);
+    let days = today_ordinal() as i64;
     let z = days + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
     let doe = z - era * 146_097;
@@ -294,8 +343,9 @@ mod tests {
         clean(&path);
         let store = HighScoreStore::load(&path);
         assert_eq!(store.high_score(), 0);
-        assert_eq!(store.best_score(GameKind::StackJump), 0);
-        assert_eq!(store.best_score(GameKind::TwentyOne), 0);
+        assert_eq!(store.best_score(GameKind::StackOverflow), 0);
+        assert_eq!(store.best_score(GameKind::DailyPr), 0);
+        assert_eq!(store.best_score(GameKind::DailyFix), 0);
         assert_eq!(store.daily_mvp(), None);
     }
 
@@ -322,7 +372,7 @@ mod tests {
         fs::write(&path, "{\n  \"high_score\": 4820\n}").unwrap();
         let store = HighScoreStore::load(&path);
         assert_eq!(store.high_score(), 4_820);
-        assert_eq!(store.best_score(GameKind::StackJump), 0);
+        assert_eq!(store.best_score(GameKind::StackOverflow), 0);
         assert!(!store.has_player_name());
         clean(&path);
     }
@@ -333,19 +383,23 @@ mod tests {
         clean(&path);
 
         let mut store = HighScoreStore::load(&path);
-        assert!(store.record(GameKind::StackJump, 4_820));
-        assert!(store.record(GameKind::TwentyOne, 1_100));
-        assert_eq!(store.high_score(), 4_820);
-        assert_eq!(store.best_score(GameKind::StackJump), 4_820);
-        assert_eq!(store.best_score(GameKind::TwentyOne), 1_100);
+        assert!(store.record(GameKind::StackOverflow, 4_820));
+        assert!(store.record(GameKind::DailyPr, 6_000_000));
+        assert!(store.record(GameKind::DailyFix, 999_000_000));
+        assert_eq!(store.high_score(), 999_000_000);
+        assert_eq!(store.best_score(GameKind::StackOverflow), 4_820);
+        assert_eq!(store.best_score(GameKind::DailyPr), 6_000_000);
+        assert_eq!(store.best_score(GameKind::DailyFix), 999_000_000);
 
         let reloaded = HighScoreStore::load(&path);
-        assert_eq!(reloaded.high_score(), 4_820);
-        assert_eq!(reloaded.best_score(GameKind::StackJump), 4_820);
-        assert_eq!(reloaded.best_score(GameKind::TwentyOne), 1_100);
+        assert_eq!(reloaded.high_score(), 999_000_000);
+        assert_eq!(reloaded.best_score(GameKind::StackOverflow), 4_820);
+        assert_eq!(reloaded.best_score(GameKind::DailyPr), 6_000_000);
+        assert_eq!(reloaded.best_score(GameKind::DailyFix), 999_000_000);
 
-        assert!(!store.record(GameKind::StackJump, 3_000));
-        assert!(!store.record(GameKind::TwentyOne, 900));
+        assert!(!store.record(GameKind::StackOverflow, 3_000));
+        assert!(!store.record(GameKind::DailyPr, 5_000_000));
+        assert!(!store.record(GameKind::DailyFix, 998_000_000));
         clean(&path);
     }
 
@@ -355,12 +409,12 @@ mod tests {
         clean(&path);
 
         let mut store = HighScoreStore::load(&path);
-        store.record(GameKind::StackJump, 12_480);
+        store.record(GameKind::StackOverflow, 12_480);
 
         let raw = fs::read_to_string(&path).unwrap();
         let data: HighScoreData = serde_json::from_str(&raw).unwrap();
         assert_eq!(data.high_score, 12_480);
-        assert_eq!(data.games["stack-jump"], 12_480);
+        assert_eq!(data.games["stack-overflow"], 12_480);
         clean(&path);
     }
 
@@ -369,8 +423,21 @@ mod tests {
         let path = temp_path("zero.json");
         clean(&path);
         let mut store = HighScoreStore::load(&path);
-        assert!(!store.record(GameKind::StackJump, 0));
-        assert!(!store.record(GameKind::TwentyOne, 0));
+        assert!(!store.record(GameKind::StackOverflow, 0));
+        assert!(!store.record(GameKind::DailyPr, 0));
+        assert!(!store.record(GameKind::DailyFix, 0));
+        clean(&path);
+    }
+
+    #[test]
+    fn lower_normalized_scores_are_not_better_records() {
+        let path = temp_path("lower.json");
+        clean(&path);
+        let mut store = HighScoreStore::load(&path);
+        // Daily PR: 1 guess (6,000,000) beats 5 guesses (2,000,000).
+        assert!(store.record(GameKind::DailyPr, 6_000_000));
+        assert!(!store.record(GameKind::DailyPr, 2_000_000));
+        assert_eq!(store.best_score(GameKind::DailyPr), 6_000_000);
         clean(&path);
     }
 
@@ -424,11 +491,11 @@ mod tests {
         clean(&path);
 
         let mut store = HighScoreStore::load(&path);
-        assert!(store.record_daily_mvp("Alex", GameKind::StackJump, 4_820));
+        assert!(store.record_daily_mvp("Alex", GameKind::StackOverflow, 4_820, None));
         let mvp = store.daily_mvp().expect("mvp set");
         assert_eq!(mvp.name, "Alex");
         assert_eq!(mvp.score, 4_820);
-        assert_eq!(mvp.game_kind(), GameKind::StackJump);
+        assert_eq!(mvp.game_kind(), GameKind::StackOverflow);
         assert_eq!(mvp.date, today_key());
 
         let reloaded = HighScoreStore::load(&path);
@@ -442,19 +509,20 @@ mod tests {
         clean(&path);
 
         let mut store = HighScoreStore::load(&path);
-        store.record_daily_mvp("Alex", GameKind::StackJump, 1_000);
+        store.record_daily_mvp("Alex", GameKind::StackOverflow, 1_000, None);
         assert!(
-            !store.record_daily_mvp("Sam", GameKind::TwentyOne, 900),
+            !store.record_daily_mvp("Sam", GameKind::DailyPr, 900, None),
             "lower score must not dethrone the MVP"
         );
         assert_eq!(store.daily_mvp().unwrap().name, "Alex");
 
         assert!(
-            store.record_daily_mvp("Sam", GameKind::TwentyOne, 1_100),
+            store.record_daily_mvp("Sam", GameKind::DailyPr, 1_100, Some("note")),
             "higher score must crown a new MVP"
         );
         assert_eq!(store.daily_mvp().unwrap().name, "Sam");
-        assert_eq!(store.daily_mvp().unwrap().game_kind(), GameKind::TwentyOne);
+        assert_eq!(store.daily_mvp().unwrap().game_kind(), GameKind::DailyPr);
+        assert_eq!(store.daily_mvp().unwrap().note.as_deref(), Some("note"));
         clean(&path);
     }
 
@@ -468,10 +536,11 @@ mod tests {
             date: "2000-01-01".to_string(),
             name: "Old Guard".to_string(),
             score: 99_999,
-            game: "stack-jump".to_string(),
+            game: "stack-overflow".to_string(),
+            note: None,
         });
         assert!(
-            store.record_daily_mvp("Fresh", GameKind::StackJump, 10),
+            store.record_daily_mvp("Fresh", GameKind::StackOverflow, 10, None),
             "a new day always starts fresh"
         );
         assert_eq!(store.daily_mvp().unwrap().name, "Fresh");
@@ -480,13 +549,17 @@ mod tests {
     }
 
     #[test]
-    fn zero_score_can_be_today_mvp_but_not_dethrone() {
+    fn zero_score_never_crowns_or_dethrones() {
         let path = temp_path("mvpzero.json");
         clean(&path);
 
         let mut store = HighScoreStore::load(&path);
-        assert!(store.record_daily_mvp("Alex", GameKind::StackJump, 0));
-        assert!(!store.record_daily_mvp("Sam", GameKind::StackJump, 0));
+        assert!(
+            !store.record_daily_mvp("Alex", GameKind::StackOverflow, 0, None),
+            "a did-not-finish must not crown the MVP"
+        );
+        assert!(store.record_daily_mvp("Alex", GameKind::StackOverflow, 100, None));
+        assert!(!store.record_daily_mvp("Sam", GameKind::StackOverflow, 0, None));
         assert_eq!(store.daily_mvp().unwrap().name, "Alex");
         clean(&path);
     }

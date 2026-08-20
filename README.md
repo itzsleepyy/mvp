@@ -2,7 +2,7 @@
 
 > A competitive terminal arcade for the time between prompts. Play quick games while your coding agent works, chase the **MVP of the day**, and jump straight back in when it needs you.
 
-**Status: early development.** MVP ships two playable games — *Stack Jump* and *Twenty One* — with local per-game scoring, a daily **MVP of the day** board, and local coding-agent integrations for Claude Code, Codex, Gemini CLI and OpenCode. Everything else on the roadmap is still to come.
+**Status: early development.** MVP ships three playable games — *Stack Overflow*, *The Daily PR* and *The Daily Fix* — with local per-game scoring, a daily **MVP of the day** board, and local coding-agent integrations for Claude Code, Codex, Gemini CLI and OpenCode. Everything else on the roadmap is still to come.
 
 ## What is MVP?
 
@@ -19,7 +19,7 @@ Games are designed for very short bursts — simple controls, instant restart, n
 ## Current project status
 
 - [x] Terminal application foundation
-- [x] Two playable games (Stack Jump, Twenty One)
+- [x] Three playable games (Stack Overflow, The Daily PR, The Daily Fix)
 - [x] Per-game local high-score persistence
 - [x] Daily MVP-of-the-day board with player names
 - [x] Claude Code integration
@@ -34,7 +34,8 @@ Games are designed for very short bursts — simple controls, instant restart, n
 On the first launch MVP asks who you are; the name is saved (change it any time with `N` on the main menu). Every finished run competes for today's board:
 
 - The **best single score** of the day — across every game — crowns the MVP of the day.
-- The current holder appears on the main menu: `MVP OF THE DAY  Alex  —  4,820  (STACK JUMP)`.
+- Daily challenges report their result in the game's own units: `MVP OF THE DAY  Alex  —  3 guesses  (THE DAILY PR)` or `MVP OF THE DAY  Sam  —  fixed in 0:42  (THE DAILY FIX)`.
+- The current holder appears on the main menu: `MVP OF THE DAY  Alex  —  4,820  (STACK OVERFLOW)`.
 - A run that dethrones the holder flashes **MVP OF THE DAY!** on the game-over panel.
 - At midnight the board resets: a new day, a new title to claim.
 
@@ -44,32 +45,33 @@ The board lives locally (per machine). Player names and scores never leave your 
 
 Press `ENTER` on the main menu to choose a game. Selection is remembered between runs, and `ESC` steps back at any time.
 
-### Stack Jump
+### Stack Overflow
 
-An endless runner: hop over obstacles while the world scrolls past and the difficulty climbs. Score grows with survival time and with every obstacle passed. `SPACE` jumps; your best run survives into the next session.
+The arcade stacker, themed as a call stack: a block as wide as the tower slides side to side, and `SPACE` drops it. Overhang is trimmed from both block and tower — a perfect drop is a clean frame (+250), a full miss is a **stack overflow**. Slide speed climbs with the stack height and your perfect streak; your score is the stack you build before the overflow.
 
-### Twenty One
+### The Daily PR
 
-Blackjack against the dealer — you versus the house, no splitting or doubling down. You start with **1,000 chips** and bet **100** per round:
+Wordle for developers — one shared 5-letter word per day, identical for everyone, six guesses. Correct letters `G`, wrong position `?`, absent `·`. **Fewest guesses wins**; a faster solve breaks the tie. The menu shows your best of the day in guesses (`BEST 3 GUESSES`); the board locks once the word is found (or revealed after six misses).
 
-- `H` hits, `S` stands.
-- The dealer stands on all 17s; naturals settle immediately.
-- A blackjack pays 3:2 (+150), a win pays even money (+100), a push returns the bet.
-- `ENTER` deals the next round.
-- The run ends when you can no longer afford the bet; your **peak** chip stack is the score that competes for the high-score board.
+### The Daily Fix
+
+One shared buggy snippet per day, identical for everyone. Spot the broken line (`BUG ▸`), type the corrected line, `ENTER` submits. **Fastest correct fix wins**. Wrong fixes cost 5s each; after two misses a hint appears (costing 15s). Solving shows the one-line lesson behind the bug.
 
 ## Controls
 
 | Key | Action |
 | --- | --- |
-| `ENTER` | Open the game menu / start the selected game / resume an agent-paused run / confirm your name |
+| Key | Action |
+| --- | --- |
+| `ENTER` | Open the game menu / start the selected game / resume an agent-paused run / confirm your name / submit a guess or fix |
 | `↑` / `↓` | Select a game (game menu) |
-| `SPACE` / `↑` | Jump (Stack Jump) |
-| `H` / `S` | Hit / stand (Twenty One) |
+| `SPACE` / `↑` | Drop the block (Stack Overflow) |
+| `A–Z`, `0–9`, symbols | Type a guess (The Daily PR) or a fix (The Daily Fix) |
+| `⌫` | Delete the last typed character |
 | `N` | Change your name (main menu) |
 | `P` | Pause / resume (manual) |
 | `R` | Restart after game over |
-| `ESC` | Back to menu / skip the name prompt |
+| `ESC` | Back to menu / cancel a name change |
 | `Q` / `CTRL+C` | Quit |
 
 ## Installation
@@ -79,7 +81,7 @@ Requires a recent stable Rust toolchain.
 ```bash
 git clone https://github.com/itzsleepyy/waitstate
 cd waitstate
-cargo install --path .
+cargo install --path package
 mvp
 ```
 
@@ -168,7 +170,7 @@ Each adapter's official lifecycle mechanism runs an MVP bridge command that neve
 | `Completed` | `Stop` | `Stop` | `AfterAgent` | `session.status` idle |
 | `Stopped` | `SessionEnd` | `SessionEnd` | `SessionEnd` | `session.deleted` |
 
-Agent-specific knowledge lives only in each adapter (`src/agent/claude`, `codex`, `gemini`, `opencode`); the app, IPC and UI are agent-agnostic.
+Agent-specific knowledge lives only in each adapter (`package/src/agent/claude`, `codex`, `gemini`, `opencode`); the app, IPC and UI are agent-agnostic.
 
 ### Known limitations
 
@@ -223,7 +225,7 @@ Input → Application → Game State → Game Simulation → Rendering
 ```
 
 ```
-src/
+package/src/
 ├── main.rs      entry point: CLI dispatch and event loop
 ├── cli.rs       subcommands (play, agent-event, hook, per-agent install/
 │                status/uninstall, integrations overview/install/repair)
@@ -254,12 +256,14 @@ src/
     ├── mod.rs       GameKind registry, the ActiveGame wrapper over live
     │                games, and the shared GameInput vocabulary
     ├── state.rs     run state
-    ├── player.rs    jumping physics (Stack Jump)
-    ├── obstacle.rs  obstacle kinds (Stack Jump)
-    ├── world.rs     obstacle spawning, speed/difficulty scaling (Stack Jump)
-    ├── collision.rs AABB collision (Stack Jump)
-    ├── scoring.rs   survival scoring and formatting (Stack Jump)
-    └── twenty_one.rs  blackjack: cards, hands, dealer rules, chips (21)
+    ├── scoring.rs   score formatting helpers
+    ├── stack_overflow.rs  the arcade stacker: tower layers, slide physics,
+    │                     perfect streaks, overflow
+    ├── daily_pr.rs  the daily Wordle: word selection, guess validation,
+    │               marks, guess-count scoring
+    ├── daily_fix.rs the daily bug: curated bug bank, fix matching,
+    │               penalties and the auto-hint
+    └── words.rs     the PR word lists (curated answers + guess dictionary)
 ```
 
 Key decisions:
@@ -270,10 +274,11 @@ Key decisions:
 - **`App::tick(dt)` advances the game only while playing** on an adequate terminal — pause and terminal-size handling live in exactly one place.
 - **All state transitions are programmatic methods** (`pause()`, `start_game()`, `handle_agent_event(...)`, …). Keyboard input and agent lifecycle events drive the same state machine without knowing about each other.
 - **Agent events arrive on a channel and are applied on the main loop** — application state stays single-threaded, no locks.
-- **The renderer consumes a plain-data `GameRenderState` snapshot** — the engine can run headlessly, which keeps the door open for tests, replays, and server-side simulation.
+- **The engine is headless**: game logic never touches terminal types, so every game is unit-tested and simulated without a screen — the door stays open for tests, replays, and server-side simulation.
 - **Manual pause and agent pause are distinct states**: agent events never override a manual pause, and auto-resume only applies to runs the agent paused (never to runs paused because an agent finished).
 - **One state machine for all agents**: adapters normalize into `AgentEvent`; per-agent statuses aggregate into one attention decision (`NeedsInput > Working > Completed > Stopped > Idle`).
-- **Obstacle spacing is guaranteed fair**: gaps are rolled as `speed × reaction time + jitter`, so every pattern is physically clearable as speed increases.
+- **Daily challenges are seeded from the day**: the PR word and the bug are picked as `pool[today_ordinal % len]`, so everyone plays the same puzzle and replays keep it.
+- **Daily scores normalize into the shared board**: fewest guesses / fastest fix are encoded as higher-is-better (`(7 − guesses) × 1e6 − seconds`, `1e9 − ms`), so one comparison serves every game and a zero (did-not-finish) is never a record.
 - The event loop is a simple 60 FPS poll loop (crossterm) plus one plain-thread IPC listener — `tokio` was intentionally not introduced: a blocking terminal game loop gains nothing from an async runtime, and short-lived hook clients need nothing more than a channel. It can be revisited for network integrations.
 - High-score storage, the daily MVP board and the player name live in the platform config directory (e.g. `~/.config/mvp/`, `~/Library/Application Support/MVP/`, `%APPDATA%\MVP\`) and degrade gracefully on any filesystem problem. The pre-rebrand `WaitState` directory is migrated from on first run.
 
@@ -281,7 +286,7 @@ Key decisions:
 
 ```text
 [x] Terminal application foundation
-[x] Two playable games (Stack Jump, Twenty One)
+[x] Three playable games (Stack Overflow, The Daily PR, The Daily Fix)
 [x] Game selection menu
 [x] Local per-game scoring
 [x] Daily MVP-of-the-day board
