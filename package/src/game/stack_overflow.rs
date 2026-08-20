@@ -156,6 +156,10 @@ impl StackOverflow {
         self.elapsed_millis as f64 / 1000.0
     }
 
+    pub fn elapsed_millis(&self) -> u64 {
+        self.elapsed_millis
+    }
+
     /// Stack height in frames.
     pub fn height(&self) -> u64 {
         self.layers.len() as u64

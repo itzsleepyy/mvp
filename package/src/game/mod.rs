@@ -37,6 +37,31 @@ pub enum GameKind {
     DailyFix,
 }
 
+/// Immutable raw metrics captured when a game completes. These values are
+/// transport-neutral; the online layer converts them into its versioned API
+/// contract while local play can ignore them entirely.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CompletedRun {
+    StackOverflow {
+        score: u64,
+        duration_ms: u64,
+        height: u64,
+    },
+    DailyPr {
+        client_run_id: Option<uuid::Uuid>,
+        day: u64,
+        solved: bool,
+        guesses: u8,
+        duration_ms: u64,
+    },
+    DailyFix {
+        day: u64,
+        charged_duration_ms: u64,
+        attempts: u32,
+        hint_used: bool,
+    },
+}
+
 impl GameKind {
     pub const ALL: [GameKind; 3] = [
         GameKind::StackOverflow,
@@ -142,6 +167,32 @@ impl ActiveGame {
             ActiveGame::DailyPr(game) => game.score(),
             ActiveGame::DailyFix(game) => game.score(),
         }
+    }
+
+    pub fn completed_run(&self) -> Option<CompletedRun> {
+        if !self.is_game_over() {
+            return None;
+        }
+        Some(match self {
+            ActiveGame::StackOverflow(game) => CompletedRun::StackOverflow {
+                score: game.score(),
+                duration_ms: game.elapsed_millis(),
+                height: game.height(),
+            },
+            ActiveGame::DailyPr(game) => CompletedRun::DailyPr {
+                client_run_id: game.completion_run_id(),
+                day: game.commit_number(),
+                solved: game.state() == daily_pr::PrState::Solved,
+                guesses: game.guesses() as u8,
+                duration_ms: game.elapsed_millis(),
+            },
+            ActiveGame::DailyFix(game) => CompletedRun::DailyFix {
+                day: game.challenge_day(),
+                charged_duration_ms: game.charged_duration_millis(),
+                attempts: game.attempts(),
+                hint_used: game.hint_shown(),
+            },
+        })
     }
 
     /// Seconds elapsed in the run so far (scoring or solving time).

@@ -1,7 +1,9 @@
 use std::collections::HashMap;
+use std::sync::mpsc::Sender;
 use std::time::Duration;
 
 use crate::agent::{AgentDisplay, AgentEvent, AgentKind, AgentState, AgentStatus};
+use crate::api::{Leaderboard, LeaderboardRequest, RunPayload, WorkerCommand, WorkerEvent};
 use crate::config::{DailyMvp, HighScoreStore};
 use crate::event::AppInput;
 use crate::game::{ActiveGame, GameInput, GameKind};
@@ -34,12 +36,22 @@ pub enum PauseReason {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppState {
     Menu,
+    Leaderboard,
     GameMenu,
     NamePrompt,
     Playing,
     PausedManual,
     PausedAgent(PauseReason),
     GameOver,
+}
+
+#[derive(Debug, Default)]
+pub enum OnlineLeaderboard {
+    #[default]
+    NotLoaded,
+    Loading,
+    Available(Leaderboard),
+    Unavailable,
 }
 
 /// The application: owns state transitions and the active game. All
@@ -78,6 +90,9 @@ pub struct App {
     /// a different agent (or a fresh session) starts working: the developer
     /// decides when to continue a finished run of the completing agent.
     agent_auto_resume: bool,
+    online_commands: Option<Sender<WorkerCommand>>,
+    online_username: Option<String>,
+    online_leaderboard: OnlineLeaderboard,
 }
 
 impl App {
@@ -97,6 +112,9 @@ impl App {
             pause_involved: Vec::new(),
             display_preference: None,
             agent_auto_resume: true,
+            online_commands: None,
+            online_username: None,
+            online_leaderboard: OnlineLeaderboard::NotLoaded,
         }
     }
 
@@ -107,6 +125,7 @@ impl App {
             AppInput::Quit => self.quit(),
             AppInput::Confirm => match self.state {
                 AppState::Menu => self.state = AppState::GameMenu,
+                AppState::Leaderboard => {}
                 AppState::GameMenu => self.start_game(),
                 AppState::NamePrompt => self.submit_name(),
                 AppState::GameOver => self.restart_same_game(),
@@ -136,6 +155,11 @@ impl App {
                     self.open_name_prompt();
                 }
             }
+            AppInput::Leaderboard => {
+                if self.state == AppState::Menu {
+                    self.open_leaderboard();
+                }
+            }
             AppInput::Text(c) => match self.state {
                 AppState::NamePrompt => self.type_name(c),
                 AppState::Playing => self.game_input(GameInput::Type(c)),
@@ -150,6 +174,7 @@ impl App {
             },
             AppInput::Back => match self.state {
                 AppState::Menu => {}
+                AppState::Leaderboard => self.state = AppState::Menu,
                 AppState::NamePrompt => self.dismiss_name_prompt(),
                 AppState::GameMenu => self.state = AppState::Menu,
                 AppState::Playing
@@ -178,15 +203,22 @@ impl App {
         } else {
             rand::random::<u64>()
         };
-        self.game = Some(if kind == GameKind::DailyPr {
+        let game = if kind == GameKind::DailyPr {
             let progress = self.store.daily_pr_progress(seed).cloned();
             ActiveGame::DailyPr(crate::game::daily_pr::DailyPr::restore(seed, progress))
         } else {
             ActiveGame::new(kind, seed, cols, rows)
-        });
+        };
+        let already_complete = game.is_game_over();
+        self.game = Some(game);
         self.new_record = false;
         self.mvp_just_set = false;
         self.state = AppState::Playing;
+        if already_complete {
+            self.persist_daily_pr();
+            let score = self.game.as_ref().map(ActiveGame::score).unwrap_or(0);
+            self.finish_run(score);
+        }
     }
 
     /// Restarts the game of the finished run (play again keeps the game).
@@ -223,6 +255,7 @@ impl App {
                 self.state = AppState::Playing;
             }
             AppState::Menu
+            | AppState::Leaderboard
             | AppState::GameMenu
             | AppState::NamePrompt
             | AppState::Playing
@@ -237,7 +270,11 @@ impl App {
             // Pressing P while the agent paused the game hands control
             // back to the developer as a manual pause.
             AppState::PausedAgent(_) => self.state = AppState::PausedManual,
-            AppState::Menu | AppState::GameMenu | AppState::NamePrompt | AppState::GameOver => {}
+            AppState::Menu
+            | AppState::Leaderboard
+            | AppState::GameMenu
+            | AppState::NamePrompt
+            | AppState::GameOver => {}
         }
     }
 
@@ -309,6 +346,12 @@ impl App {
         }
         if input == GameInput::Confirm {
             self.persist_daily_pr();
+        }
+        if self.state == AppState::Playing
+            && self.game.as_ref().is_some_and(ActiveGame::is_game_over)
+        {
+            let score = self.game.as_ref().map(ActiveGame::score).unwrap_or(0);
+            self.finish_run(score);
         }
     }
 
@@ -401,6 +444,7 @@ impl App {
                 }
             }
             AppState::Menu
+            | AppState::Leaderboard
             | AppState::GameMenu
             | AppState::NamePrompt
             | AppState::PausedManual
@@ -534,11 +578,22 @@ impl App {
             .map(ActiveGame::kind)
             .unwrap_or(GameKind::StackOverflow);
         let note = self.game.as_ref().and_then(ActiveGame::score_note);
+        let completed = self.game.as_ref().and_then(ActiveGame::completed_run);
         let name = self.player_name().to_string();
         self.new_record = self.store.record(kind, score);
         self.mvp_just_set = self
             .store
             .record_daily_mvp(&name, kind, score, note.as_deref());
+        if self.online_username.is_some()
+            && let (Some(commands), Some(completed)) = (&self.online_commands, completed)
+        {
+            match RunPayload::from_completed(&completed) {
+                Ok(run) => {
+                    let _ = commands.send(WorkerCommand::Submit(run));
+                }
+                Err(error) => crate::debug_log!("online run rejected locally: {error}"),
+            }
+        }
         self.state = AppState::GameOver;
     }
 
@@ -638,6 +693,54 @@ impl App {
     /// game-over panel until the next run starts).
     pub fn mvp_just_set(&self) -> bool {
         self.mvp_just_set
+    }
+
+    pub fn configure_online(&mut self, commands: Sender<WorkerCommand>, username: Option<String>) {
+        self.online_commands = Some(commands);
+        self.online_username = username;
+    }
+
+    fn open_leaderboard(&mut self) {
+        self.state = AppState::Leaderboard;
+        self.online_leaderboard = OnlineLeaderboard::Loading;
+        let sent = self.online_commands.as_ref().is_some_and(|commands| {
+            commands
+                .send(WorkerCommand::Leaderboard(LeaderboardRequest::Daily {
+                    date: None,
+                    limit: 10,
+                }))
+                .is_ok()
+        });
+        if !sent {
+            self.online_leaderboard = OnlineLeaderboard::Unavailable;
+        }
+    }
+
+    pub fn handle_online_event(&mut self, event: WorkerEvent) {
+        match event {
+            WorkerEvent::Leaderboard(Ok(board)) => {
+                self.online_leaderboard = OnlineLeaderboard::Available(board)
+            }
+            WorkerEvent::Leaderboard(Err(_)) => {
+                self.online_leaderboard = OnlineLeaderboard::Unavailable
+            }
+            WorkerEvent::Error(error) => crate::debug_log!("online worker: {error}"),
+            WorkerEvent::RunQueued(id) => crate::debug_log!("online run queued: {id}"),
+            WorkerEvent::QueueProcessed(result) => crate::debug_log!(
+                "online queue: {} submitted, {} remaining",
+                result.submitted,
+                result.remaining
+            ),
+            WorkerEvent::Stopped => {}
+        }
+    }
+
+    pub fn online_leaderboard(&self) -> &OnlineLeaderboard {
+        &self.online_leaderboard
+    }
+
+    pub fn online_username(&self) -> Option<&str> {
+        self.online_username.as_deref()
     }
 
     #[cfg(test)]
@@ -749,6 +852,76 @@ mod tests {
         assert!(!app.should_quit());
         assert_eq!(app.agent_aggregate(), AgentStatus::Disconnected);
         assert_eq!(app.connected_agent_count(), 0);
+    }
+
+    #[test]
+    fn leaderboard_opens_without_blocking_and_requests_the_daily_board() {
+        let mut app = app_with_size(temp_store("leaderboard.json"), 100, 30);
+        let (commands, received) = std::sync::mpsc::channel();
+        app.configure_online(commands, None);
+
+        app.handle_input(AppInput::Leaderboard);
+        assert_eq!(app.state, AppState::Leaderboard);
+        assert!(matches!(
+            app.online_leaderboard(),
+            OnlineLeaderboard::Loading
+        ));
+        assert!(matches!(
+            received.try_recv().unwrap(),
+            WorkerCommand::Leaderboard(LeaderboardRequest::Daily {
+                date: None,
+                limit: 10
+            })
+        ));
+
+        app.handle_input(AppInput::Back);
+        assert_eq!(app.state, AppState::Menu);
+    }
+
+    #[test]
+    fn completed_runs_are_submitted_only_for_a_logged_in_account() {
+        let mut logged_in = playing_app();
+        let (commands, received) = std::sync::mpsc::channel();
+        logged_in.configure_online(commands, Some("octocat".into()));
+        logged_in.tick(Duration::from_secs(1));
+        scored_run(&mut logged_in);
+        let WorkerCommand::Submit(run) = received.try_recv().unwrap() else {
+            panic!("expected a run submission");
+        };
+        assert_eq!(run.game_id, crate::api::GameId::StackOverflow);
+        assert!(run.raw_score > 0);
+
+        let mut anonymous = playing_app();
+        let (commands, received) = std::sync::mpsc::channel();
+        anonymous.configure_online(commands, None);
+        scored_run(&mut anonymous);
+        assert!(received.try_recv().is_err());
+        assert_eq!(anonymous.state, AppState::GameOver);
+    }
+
+    #[test]
+    fn restoring_a_completed_daily_pr_replays_the_same_run_id() {
+        let dir = temp_dir("completed-pr-online");
+        let path = dir.join("highscore.json");
+        let mut first = app_with_size(HighScoreStore::load(&path), 100, 30);
+        let (commands, received) = std::sync::mpsc::channel();
+        first.configure_online(commands, Some("octocat".into()));
+        first.start_game_of(GameKind::DailyPr);
+        let word = first.game().unwrap().as_daily_pr().unwrap().word();
+        type_word(&mut first, &word);
+        let Ok(WorkerCommand::Submit(first_run)) = received.try_recv() else {
+            panic!("expected the first Daily PR submission");
+        };
+
+        let mut restored = app_with_size(HighScoreStore::load(&path), 100, 30);
+        let (commands, received) = std::sync::mpsc::channel();
+        restored.configure_online(commands, Some("octocat".into()));
+        restored.start_game_of(GameKind::DailyPr);
+        assert_eq!(restored.state, AppState::GameOver);
+        let Ok(WorkerCommand::Submit(replayed)) = received.try_recv() else {
+            panic!("expected the restored Daily PR submission");
+        };
+        assert_eq!(replayed.client_run_id, first_run.client_run_id);
     }
 
     #[test]

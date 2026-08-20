@@ -391,6 +391,7 @@ pub const BANK: &[Bug] = &[
 
 /// A run of The Daily Fix: today's bug, an input buffer and a clock.
 pub struct DailyFix {
+    challenge_day: u64,
     bug: &'static Bug,
     input: String,
     attempts: u32,
@@ -403,6 +404,7 @@ pub struct DailyFix {
 impl DailyFix {
     pub fn new(seed: u64) -> Self {
         Self {
+            challenge_day: seed,
             bug: &BANK[seed as usize % BANK.len()],
             input: String::new(),
             attempts: 0,
@@ -491,6 +493,14 @@ impl DailyFix {
     /// hint.
     pub fn total_seconds(&self) -> f64 {
         (self.elapsed_millis + self.penalty_ms) as f64 / 1000.0
+    }
+
+    pub fn charged_duration_millis(&self) -> u64 {
+        self.elapsed_millis + self.penalty_ms
+    }
+
+    pub fn challenge_day(&self) -> u64 {
+        self.challenge_day
     }
 
     pub fn bug(&self) -> &'static Bug {

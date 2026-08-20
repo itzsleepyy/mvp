@@ -6,7 +6,7 @@ A competitive terminal arcade for the time between coding-agent prompts.
 
 MVP turns the short waits while Claude Code, Codex, Gemini CLI, or OpenCode works into quick terminal games. Agent lifecycle integrations pause the game when an agent needs attention and let you return to work without losing a run.
 
-Your best local result can claim **MVP of the day** for the current OS user. Names, scores, and daily progress stay on your computer.
+Local play works without an account. GitHub sign-in adds global score submission, ranks, and the Daily MVP competition; game traffic never includes source code, prompts, repositories, terminal contents, or coding-agent output.
 
 ## Games
 
@@ -33,6 +33,20 @@ Each provider also supports `status` and `uninstall`. Installers preserve unrela
 
 See [Agent Integrations](docs/agent-integrations.md) for lifecycle mappings, behavior, and limitations.
 
+## Online Competition
+
+```bash
+mvp login
+mvp whoami
+mvp profile
+mvp leaderboard
+mvp leaderboard weekly
+mvp leaderboard stack-overflow
+mvp logout
+```
+
+GitHub login uses Device Flow and stores the MVP session in the operating system credential store. Failed authenticated run submissions are queued locally and retried without interrupting play. Press `L` on the main menu to open Daily MVP; local games remain available when the service is offline.
+
 ## Installation
 
 Requires a recent stable Rust toolchain.
@@ -56,6 +70,7 @@ Legacy compatibility: pre-rebrand `WaitState` score files are copied into the MV
 | Printable characters | Type a Daily PR guess or Daily Fix answer |
 | `Backspace` | Delete the last character |
 | `N` | Change player name from the main menu |
+| `L` | View the online Daily MVP leaderboard |
 | `P` | Pause or resume manually |
 | `R` | Restart after game over |
 | `ESC` | Go back or cancel a rename; the first-run name prompt is required |
@@ -73,13 +88,6 @@ cargo clippy -- -D warnings
 ```
 
 The root is a Cargo workspace and `package/src/` is the authoritative Rust implementation. See [Development](docs/development.md) and [Architecture](docs/architecture.md) for technical details.
-
-## Roadmap
-
-- GitHub identity
-- Online score submission
-- Global and friend leaderboards
-- Additional games and multiplayer
 
 ## License
 

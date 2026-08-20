@@ -6,7 +6,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph};
 
 use crate::agent::{AgentDisplay, AgentKind, AgentStatus};
-use crate::app::{App, AppState, PauseReason};
+use crate::app::{App, AppState, OnlineLeaderboard, PauseReason};
 use crate::game::daily_fix::DailyFix;
 use crate::game::daily_pr::{DailyPr, MAX_GUESSES, Mark};
 use crate::game::scoring::{format_elapsed, format_score};
@@ -32,6 +32,7 @@ pub fn render(frame: &mut Frame, app: &App) {
     }
     match app.state {
         AppState::Menu => render_menu(frame, app),
+        AppState::Leaderboard => render_leaderboard(frame, app),
         AppState::GameMenu => render_game_menu(frame, app),
         AppState::NamePrompt => render_name_prompt(frame, app),
         AppState::Playing
@@ -148,10 +149,83 @@ fn render_menu(frame: &mut Frame, app: &App) {
     let paragraph = Paragraph::new(lines).alignment(Alignment::Center);
     frame.render_widget(paragraph, vertical[1]);
     frame.render_widget(
-        Paragraph::new("[ N ] CHANGE NAME    [ Q ] QUIT")
+        Paragraph::new("[ L ] LEADERBOARD    [ N ] CHANGE NAME    [ Q ] QUIT")
             .style(dim)
             .alignment(Alignment::Center),
         footer,
+    );
+}
+
+fn render_leaderboard(frame: &mut Frame, app: &App) {
+    let area = frame.area();
+    let title = Style::new().fg(Color::Magenta).add_modifier(Modifier::BOLD);
+    let white = Style::new().fg(Color::White);
+    let dim = Style::new().fg(Color::DarkGray);
+    let green = Style::new().fg(Color::Green);
+    let yellow = Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD);
+    let mut lines = vec![
+        Line::styled("MVP - DAILY LEADERBOARD", title),
+        Line::from(""),
+    ];
+
+    match app.online_leaderboard() {
+        OnlineLeaderboard::NotLoaded | OnlineLeaderboard::Loading => {
+            lines.push(Line::styled("Loading global leaderboard...", dim));
+        }
+        OnlineLeaderboard::Unavailable => {
+            lines.push(Line::styled("Global leaderboard unavailable.", yellow));
+            lines.push(Line::styled("Local scores are still available.", dim));
+            lines.push(Line::from(""));
+            lines.push(Line::styled("OFFLINE", dim));
+        }
+        OnlineLeaderboard::Available(board) => {
+            lines.push(Line::styled("  #   Programmer                 MVP", dim));
+            let username = app.online_username();
+            for entry in &board.entries {
+                let mine =
+                    username.is_some_and(|name| name.eq_ignore_ascii_case(&entry.user.username));
+                let style = if mine { yellow } else { white };
+                lines.push(Line::styled(
+                    format!(
+                        "{:>3}   {:<22} {:>8}",
+                        entry.rank,
+                        entry.user.username.chars().take(22).collect::<String>(),
+                        format_score(entry.points.max(0) as u64)
+                    ),
+                    style,
+                ));
+            }
+            lines.push(Line::from(""));
+            if let Some(name) = username {
+                let rank = board
+                    .entries
+                    .iter()
+                    .find(|entry| entry.user.username.eq_ignore_ascii_case(name))
+                    .map(|entry| format!("#{}", entry.rank))
+                    .unwrap_or_else(|| "outside top 10".to_string());
+                lines.push(Line::styled(format!("YOU: {rank}"), yellow));
+            } else {
+                lines.push(Line::styled(
+                    "Sign in with `mvp login` to submit scores.",
+                    dim,
+                ));
+            }
+            lines.push(Line::styled("ONLINE", green));
+        }
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::styled("[ ESC ] BACK", dim));
+
+    let total = lines.len() as u16;
+    let vertical = Layout::vertical([
+        Constraint::Length(area.height.saturating_sub(total) / 2),
+        Constraint::Length(total.min(area.height)),
+        Constraint::Min(0),
+    ])
+    .split(area);
+    frame.render_widget(
+        Paragraph::new(lines).alignment(Alignment::Center),
+        vertical[1],
     );
 }
 
@@ -309,7 +383,11 @@ fn render_game_frame(
         AppState::PausedManual => render_paused(frame, area, app),
         AppState::PausedAgent(reason) => render_agent_paused(frame, area, app, reason),
         AppState::GameOver => render_game_over(frame, area, app),
-        AppState::Playing | AppState::Menu | AppState::GameMenu | AppState::NamePrompt => {}
+        AppState::Playing
+        | AppState::Menu
+        | AppState::Leaderboard
+        | AppState::GameMenu
+        | AppState::NamePrompt => {}
     }
 }
 
@@ -1124,6 +1202,55 @@ mod tests {
     }
 
     #[test]
+    fn leaderboard_renders_online_rank_and_offline_fallback() {
+        let mut online = app_at(100, 30);
+        let (commands, _received) = std::sync::mpsc::channel();
+        online.configure_online(commands, Some("alex".into()));
+        online.handle_input(AppInput::Leaderboard);
+        let board = serde_json::from_value(serde_json::json!({
+            "period": "daily",
+            "from": "2026-08-20",
+            "through": "2026-08-20",
+            "game_id": null,
+            "entries": [
+                {
+                    "rank": 1,
+                    "user": {
+                        "id": uuid::Uuid::new_v4(),
+                        "username": "alice",
+                        "display_name": "alice",
+                        "avatar_url": null
+                    },
+                    "points": 9420
+                },
+                {
+                    "rank": 2,
+                    "user": {
+                        "id": uuid::Uuid::new_v4(),
+                        "username": "alex",
+                        "display_name": "alex",
+                        "avatar_url": null
+                    },
+                    "points": 9180
+                }
+            ]
+        }))
+        .unwrap();
+        online.handle_online_event(crate::api::WorkerEvent::Leaderboard(Ok(board)));
+        let text = all_text(&render_buffer(&online, 100, 30));
+        assert!(text.contains("DAILY LEADERBOARD"));
+        assert!(text.contains("alice"));
+        assert!(text.contains("YOU: #2"));
+        assert!(text.contains("ONLINE"));
+
+        let mut offline = app_at(100, 30);
+        offline.handle_input(AppInput::Leaderboard);
+        let text = all_text(&render_buffer(&offline, 100, 30));
+        assert!(text.contains("Global leaderboard unavailable."));
+        assert!(text.contains("Local scores are still available."));
+    }
+
+    #[test]
     fn menu_render_uses_doh_logo_when_the_terminal_has_room() {
         let app = app_at(120, 40);
         let buffer = render_buffer(&app, 120, 40);
@@ -1186,7 +1313,7 @@ mod tests {
         assert!(
             rows.last()
                 .unwrap()
-                .contains("[ N ] CHANGE NAME    [ Q ] QUIT")
+                .contains("[ L ] LEADERBOARD    [ N ] CHANGE NAME    [ Q ] QUIT")
         );
 
         app.start_game();

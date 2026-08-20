@@ -20,9 +20,14 @@
 //! mvp integrations install         install for detected agents
 //! mvp integrations install --all   install every supported agent
 //! mvp integrations repair          fix missing/outdated pieces
+//! mvp login                        sign in with GitHub
+//! mvp logout                       revoke the local online session
+//! mvp whoami                       show local and online identity
+//! mvp profile                      show implemented online statistics
+//! mvp leaderboard [BOARD]          show a global leaderboard
 //! ```
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 use crate::agent::event::AgentEvent;
 use crate::agent::status::{AgentDisplay, AgentKind};
@@ -96,6 +101,31 @@ pub enum Command {
         #[command(subcommand)]
         command: Option<IntegrationsCommand>,
     },
+    /// Sign in to MVP with GitHub Device Flow
+    Login,
+    /// Revoke the MVP session and remove it from the credential store
+    Logout,
+    /// Show the local player and linked GitHub identity
+    Whoami,
+    /// Show online ranks and game statistics
+    Profile,
+    /// Show a global MVP leaderboard (daily by default)
+    Leaderboard {
+        /// Board to display
+        #[arg(value_enum, default_value_t = LeaderboardKind::Daily)]
+        board: LeaderboardKind,
+    },
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
+pub enum LeaderboardKind {
+    #[default]
+    Daily,
+    Weekly,
+    AllTime,
+    StackOverflow,
+    DailyPr,
+    DailyFix,
 }
 
 #[derive(Debug, Subcommand)]
@@ -354,6 +384,38 @@ mod tests {
             cli.command,
             Some(Command::Integrations {
                 command: Some(IntegrationsCommand::Repair)
+            })
+        ));
+    }
+
+    #[test]
+    fn online_commands_parse() {
+        assert!(matches!(
+            parse(&["mvp", "login"]).command,
+            Some(Command::Login)
+        ));
+        assert!(matches!(
+            parse(&["mvp", "logout"]).command,
+            Some(Command::Logout)
+        ));
+        assert!(matches!(
+            parse(&["mvp", "whoami"]).command,
+            Some(Command::Whoami)
+        ));
+        assert!(matches!(
+            parse(&["mvp", "profile"]).command,
+            Some(Command::Profile)
+        ));
+        assert!(matches!(
+            parse(&["mvp", "leaderboard"]).command,
+            Some(Command::Leaderboard {
+                board: LeaderboardKind::Daily
+            })
+        ));
+        assert!(matches!(
+            parse(&["mvp", "leaderboard", "stack-overflow"]).command,
+            Some(Command::Leaderboard {
+                board: LeaderboardKind::StackOverflow
             })
         ));
     }

@@ -26,6 +26,8 @@ pub struct DailyPrProgress {
     pub day: u64,
     pub guesses: Vec<String>,
     pub elapsed_millis: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_run_id: Option<uuid::Uuid>,
 }
 
 /// Feedback for one letter of a guess.
@@ -70,6 +72,7 @@ pub struct DailyPr {
     status: Option<&'static str>,
     state: PrState,
     elapsed_millis: u64,
+    completion_run_id: Option<uuid::Uuid>,
 }
 
 impl DailyPr {
@@ -88,6 +91,7 @@ impl DailyPr {
             status: None,
             state: PrState::Playing,
             elapsed_millis: 0,
+            completion_run_id: None,
         }
     }
 
@@ -98,6 +102,7 @@ impl DailyPr {
         let Some(progress) = progress.filter(|saved| saved.day == seed) else {
             return game;
         };
+        let completion_run_id = progress.completion_run_id;
         for guess in progress.guesses.into_iter().take(MAX_GUESSES) {
             if game.state != PrState::Playing {
                 break;
@@ -106,6 +111,9 @@ impl DailyPr {
             game.submit();
         }
         game.elapsed_millis = progress.elapsed_millis;
+        if completion_run_id.is_some() {
+            game.completion_run_id = completion_run_id;
+        }
         game.input.clear();
         game.status = None;
         game
@@ -122,6 +130,7 @@ impl DailyPr {
                 .map(|guess| guess.word.clone())
                 .collect(),
             elapsed_millis: self.elapsed_millis,
+            completion_run_id: self.completion_run_id,
         }
     }
 
@@ -191,6 +200,9 @@ impl DailyPr {
         } else {
             PrState::Playing
         };
+        if self.state != PrState::Playing && self.completion_run_id.is_none() {
+            self.completion_run_id = Some(uuid::Uuid::new_v4());
+        }
     }
 
     // ---- accessors ---------------------------------------------------------
@@ -206,7 +218,7 @@ impl DailyPr {
         match self.state {
             PrState::Solved => {
                 let unused = (MAX_GUESSES as u64 + 1) - self.guesses.len() as u64;
-                unused * GUESS_WEIGHT - self.elapsed_millis / 1000
+                (unused * GUESS_WEIGHT).saturating_sub(self.elapsed_millis / 1000)
             }
             PrState::Playing | PrState::Failed => 0,
         }
@@ -214,6 +226,10 @@ impl DailyPr {
 
     pub fn elapsed(&self) -> f64 {
         self.elapsed_millis as f64 / 1000.0
+    }
+
+    pub fn elapsed_millis(&self) -> u64 {
+        self.elapsed_millis
     }
 
     /// The number of guesses used (0 while playing).
@@ -232,6 +248,10 @@ impl DailyPr {
     /// The daily PR's "commit number" (the day ordinal).
     pub fn commit_number(&self) -> u64 {
         self.commit_number
+    }
+
+    pub fn completion_run_id(&self) -> Option<uuid::Uuid> {
+        self.completion_run_id
     }
 
     pub fn guesses_used(&self) -> &[Guess] {
