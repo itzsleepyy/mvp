@@ -93,6 +93,8 @@ pub struct App {
     online_commands: Option<Sender<WorkerCommand>>,
     online_username: Option<String>,
     online_leaderboard: OnlineLeaderboard,
+    account_requested: bool,
+    account_message: Option<String>,
 }
 
 impl App {
@@ -115,6 +117,8 @@ impl App {
             online_commands: None,
             online_username: None,
             online_leaderboard: OnlineLeaderboard::NotLoaded,
+            account_requested: false,
+            account_message: None,
         }
     }
 
@@ -158,6 +162,12 @@ impl App {
             AppInput::Leaderboard => {
                 if self.state == AppState::Menu {
                     self.open_leaderboard();
+                }
+            }
+            AppInput::Account => {
+                if self.state == AppState::Menu {
+                    self.account_requested = true;
+                    self.account_message = None;
                 }
             }
             AppInput::Text(c) => match self.state {
@@ -700,6 +710,23 @@ impl App {
         self.online_username = username;
     }
 
+    pub fn clear_online(&mut self) {
+        self.online_commands = None;
+        self.online_username = None;
+    }
+
+    pub fn take_account_request(&mut self) -> bool {
+        std::mem::take(&mut self.account_requested)
+    }
+
+    pub fn set_account_message(&mut self, message: impl Into<String>) {
+        self.account_message = Some(message.into());
+    }
+
+    pub fn account_message(&self) -> Option<&str> {
+        self.account_message.as_deref()
+    }
+
     fn open_leaderboard(&mut self) {
         self.state = AppState::Leaderboard;
         self.online_leaderboard = OnlineLeaderboard::Loading;
@@ -852,6 +879,19 @@ mod tests {
         assert!(!app.should_quit());
         assert_eq!(app.agent_aggregate(), AgentStatus::Disconnected);
         assert_eq!(app.connected_agent_count(), 0);
+    }
+
+    #[test]
+    fn account_action_is_requested_only_from_menu() {
+        let mut app = app_with_size(temp_store("account.json"), 100, 30);
+        app.handle_input(AppInput::Account);
+        assert!(app.take_account_request());
+        assert!(!app.take_account_request());
+
+        app.handle_input(AppInput::Confirm);
+        assert_eq!(app.state, AppState::GameMenu);
+        app.handle_input(AppInput::Account);
+        assert!(!app.take_account_request());
     }
 
     #[test]

@@ -24,6 +24,8 @@ pub enum AppInput {
     Rename,
     /// L — open the global leaderboard from the menu.
     Leaderboard,
+    /// I — open sign-in/account handling from the menu.
+    Account,
     /// A printable character typed into the name prompt or a game.
     Text(char),
     /// Backspace in the name prompt or a game.
@@ -83,6 +85,7 @@ fn key_to_input(key: event::KeyEvent, text_mode: bool) -> Option<AppInput> {
         KeyCode::Char('r') | KeyCode::Char('R') => press.then_some(AppInput::Restart),
         KeyCode::Char('n') | KeyCode::Char('N') => press.then_some(AppInput::Rename),
         KeyCode::Char('l') | KeyCode::Char('L') => press.then_some(AppInput::Leaderboard),
+        KeyCode::Char('i') | KeyCode::Char('I') => press.then_some(AppInput::Account),
         KeyCode::Esc => press.then_some(AppInput::Back),
         KeyCode::Char('q') | KeyCode::Char('Q') => press.then_some(AppInput::Quit),
         _ => None,
@@ -175,6 +178,15 @@ mod tests {
             key_to_input(key(KeyCode::Char('l'), KeyModifiers::NONE), false),
             Some(AppInput::Leaderboard)
         );
+    }
+
+    #[test]
+    fn i_is_account() {
+        assert_eq!(
+            key_to_input(key(KeyCode::Char('I'), KeyModifiers::NONE), false),
+            Some(AppInput::Account)
+        );
+        assert_eq!(key_to_input(release(KeyCode::Char('i')), false), None);
     }
 
     #[test]

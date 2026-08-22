@@ -12,14 +12,15 @@ mod ui;
 
 use std::error::Error;
 use std::future::Future;
+use std::io;
 use std::time::Instant;
 
 use clap::Parser;
 
 use crate::agent::status::{AgentDisplay, AgentKind};
 use crate::api::{
-    ApiClient, ApiWorker, AuthFlow, GameId, KeyringCredentialStore, Leaderboard,
-    LeaderboardRequest, Session, SessionManager, WorkerCommand,
+    ApiClient, ApiWorker, AuthFlow, BrowserFlow, EmailFlow, GameId, KeyringCredentialStore,
+    Leaderboard, LeaderboardRequest, PollingFlow, Session, SessionManager, WorkerCommand,
 };
 use crate::cli::{Command, IntegrationsCommand, LeaderboardKind, ProviderCommand};
 
@@ -77,7 +78,14 @@ fn main() -> Result<(), Box<dyn Error>> {
                 Ok(())
             }
         },
-        Some(Command::Login) => run_online(run_login()),
+        Some(Command::Login { github, email }) => {
+            let request = match (github, email) {
+                (true, _) => LoginRequest::Github,
+                (false, Some(email)) => LoginRequest::Email(email),
+                (false, None) => LoginRequest::Browser,
+            };
+            run_online(async move { run_login(request, true).await.map(|_| ()) })
+        }
         Some(Command::Logout) => run_online(run_logout()),
         Some(Command::Whoami) => run_online(run_whoami()),
         Some(Command::Profile) => run_online(run_profile()),
@@ -85,9 +93,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 }
 
-fn run_online<F>(future: F) -> Result<(), Box<dyn Error>>
+fn run_online<F, T>(future: F) -> Result<T, Box<dyn Error>>
 where
-    F: Future<Output = Result<(), Box<dyn Error>>>,
+    F: Future<Output = Result<T, Box<dyn Error>>>,
 {
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -95,38 +103,88 @@ where
         .block_on(future)
 }
 
-async fn run_login() -> Result<(), Box<dyn Error>> {
+enum LoginRequest {
+    Browser,
+    Github,
+    Email(String),
+}
+
+async fn run_login(
+    request: LoginRequest,
+    use_existing: bool,
+) -> Result<Option<Session>, Box<dyn Error>> {
     let client = ApiClient::from_env()?;
     let credentials = KeyringCredentialStore::for_origin(client.origin());
     let manager = SessionManager::new(client, credentials);
-    if let Some(session) = manager.load()? {
-        println!("Already signed in as GitHub @{}.", session.user.username);
-        return Ok(());
+    if use_existing && let Some(session) = manager.load()? {
+        println!("Already signed in as {}.", session.user.username);
+        return Ok(Some(session));
     }
 
-    let flow = manager.start_github(false).await?;
-    println!("Open {}", flow.verification_uri);
-    println!("Enter code: {}", flow.user_code);
-    if open::that(&flow.verification_uri).is_err() {
-        println!("The browser could not be opened automatically.");
-    }
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(flow.expires_in);
-    let mut delay = std::time::Duration::from_secs(flow.interval.max(1));
+    let session = match request {
+        LoginRequest::Browser => {
+            let flow: BrowserFlow = manager.start_browser().await?;
+            println!("Finish signing in through your browser.");
+            println!("Open {}", flow.verification_uri);
+            if let Err(error) = open::that(&flow.verification_uri) {
+                println!("The browser could not be opened automatically ({error}).");
+                println!("Open this URL to continue: {}", flow.verification_uri);
+            }
+            poll_until_complete(&manager, &flow, "Browser sign-in").await?
+        }
+        LoginRequest::Github => {
+            let flow = manager.start_github(false).await?;
+            println!("Open {}", flow.verification_uri);
+            println!("Enter GitHub code: {}", flow.user_code);
+            if open::that(&flow.verification_uri).is_err() {
+                println!("The browser could not be opened automatically.");
+            }
+            poll_until_complete(&manager, &flow, "GitHub sign-in").await?
+        }
+        LoginRequest::Email(email) => {
+            let flow: EmailFlow = manager.start_email(email.trim()).await?;
+            println!(
+                "Magic sign-in link sent to {}. Open it in your browser; waiting for verification...",
+                redact_email(flow.email())
+            );
+            poll_until_complete(&manager, &flow, "Email sign-in").await?
+        }
+    };
+    println!("Signed in as {}.", session.user.username);
+    Ok(Some(session))
+}
+
+async fn poll_until_complete<S, F>(
+    manager: &SessionManager<S>,
+    flow: &F,
+    label: &str,
+) -> Result<Session, Box<dyn Error>>
+where
+    S: crate::api::CredentialStore,
+    F: PollingFlow,
+{
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(flow.expires_in());
+    let mut delay = std::time::Duration::from_secs(flow.interval().max(1));
     loop {
         tokio::time::sleep(delay).await;
         if tokio::time::Instant::now() >= deadline {
-            return Err(
-                std::io::Error::other("GitHub login expired; run `mvp login` again").into(),
-            );
+            return Err(io::Error::other(format!("{label} expired; run `mvp login` again")).into());
         }
-        match manager.poll_once(&flow).await? {
-            AuthFlow::Pending { retry_after } => delay = retry_after,
-            AuthFlow::Complete(session) => {
-                println!("Signed in as GitHub @{}.", session.user.username);
-                return Ok(());
+        match manager.poll_once(flow).await? {
+            AuthFlow::Pending { retry_after } => {
+                delay = retry_after.max(std::time::Duration::from_secs(1));
             }
+            AuthFlow::Complete(session) => return Ok(session),
         }
     }
+}
+
+fn redact_email(email: &str) -> String {
+    let Some((local, domain)) = email.split_once('@') else {
+        return "[REDACTED]".into();
+    };
+    let first = local.chars().next().unwrap_or('*');
+    format!("{first}***@{domain}")
 }
 
 async fn run_logout() -> Result<(), Box<dyn Error>> {
@@ -158,12 +216,12 @@ async fn run_whoami() -> Result<(), Box<dyn Error>> {
     let local_name = config::HighScoreStore::discover().player_name().to_string();
     println!("{local_name}");
     let Some(session) = manager.load()? else {
-        println!("GitHub: not signed in");
+        println!("Online identity: not signed in");
         println!("Global rank: unranked");
         return Ok(());
     };
     let profile = client.me(&session).await?;
-    println!("GitHub: @{}", profile.username);
+    println!("Online identity: {}", profile.username);
     println!("Global rank: {}", format_rank(profile.stats.global_rank));
     Ok(())
 }
@@ -176,7 +234,7 @@ async fn run_profile() -> Result<(), Box<dyn Error>> {
     let profile = client.me(&session).await?;
     let local_name = config::HighScoreStore::discover().player_name().to_string();
     println!("{local_name}");
-    println!("GitHub @{}", profile.username);
+    println!("Signed-in username: {}", profile.username);
     println!();
     println!("Daily rank       {}", format_rank(profile.stats.daily_rank));
     println!(
@@ -333,12 +391,7 @@ fn run(
     let mut app = app::App::new(config::HighScoreStore::discover());
     app.set_agent_display(agent);
     app.set_agent_auto_resume(!no_auto_resume);
-    if let Some((worker, username)) = &online {
-        app.configure_online(worker.commands(), username.clone());
-        if username.is_some() {
-            let _ = worker.commands().send(WorkerCommand::RetryPending);
-        }
-    }
+    configure_app_online(&mut app, online.as_ref());
     let size = terminal.size()?;
     app.set_terminal_size(size.width, size.height);
     if !app.has_player_name() {
@@ -379,6 +432,10 @@ fn run(
             if app.should_quit() {
                 break;
             }
+            if app.take_account_request() {
+                handle_tui_account(terminal, &mut app, &mut online)?;
+                break;
+            }
         }
         let now = Instant::now();
         app.tick(now.duration_since(last_frame));
@@ -388,6 +445,44 @@ fn run(
     if let Some((worker, _)) = online.take() {
         worker.shutdown();
     }
+    Ok(())
+}
+
+fn configure_app_online(app: &mut app::App, online: Option<&(ApiWorker, Option<String>)>) {
+    app.clear_online();
+    if let Some((worker, username)) = online {
+        app.configure_online(worker.commands(), username.clone());
+        if username.is_some() {
+            let _ = worker.commands().send(WorkerCommand::RetryPending);
+        }
+    }
+}
+
+fn handle_tui_account(
+    terminal: &mut tui::Tui,
+    app: &mut app::App,
+    online: &mut Option<(ApiWorker, Option<String>)>,
+) -> Result<(), Box<dyn Error>> {
+    tui::restore()?;
+    if let Some((worker, _)) = online.take() {
+        worker.shutdown();
+    }
+    app.clear_online();
+
+    let result = run_online(run_login(LoginRequest::Browser, false));
+    *online = start_online_worker();
+    configure_app_online(app, online.as_ref());
+    match result {
+        Ok(Some(session)) => {
+            app.set_account_message(format!("ONLINE AS {}", session.user.username))
+        }
+        Ok(None) => app.set_account_message("SIGN-IN CANCELLED"),
+        Err(error) => app.set_account_message(format!("SIGN-IN FAILED: {error}")),
+    }
+
+    *terminal = tui::init()?;
+    let size = terminal.size()?;
+    app.set_terminal_size(size.width, size.height);
     Ok(())
 }
 

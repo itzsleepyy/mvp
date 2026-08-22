@@ -7,7 +7,10 @@ mod leaderboard;
 mod queue;
 mod runs;
 
-pub use auth::{AuthFlow, KeyringCredentialStore, Session, SessionManager};
+pub use auth::{
+    AuthFlow, BrowserFlow, CredentialStore, EmailFlow, KeyringCredentialStore, PollingFlow,
+    Session, SessionManager,
+};
 pub use client::{ApiClient, ApiError};
 pub use leaderboard::{Leaderboard, LeaderboardRequest};
 pub use queue::{PendingRunQueue, QueueProcessResult};

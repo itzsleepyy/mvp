@@ -20,7 +20,10 @@
 //! mvp integrations install         install for detected agents
 //! mvp integrations install --all   install every supported agent
 //! mvp integrations repair          fix missing/outdated pieces
-//! mvp login                        sign in with GitHub
+//! mvp login                        sign in through the MVP website
+//! mvp login --github               sign in with GitHub Device Flow
+//! mvp login --email USER@EXAMPLE.COM
+//!                                  sign in with an email magic link
 //! mvp logout                       revoke the local online session
 //! mvp whoami                       show local and online identity
 //! mvp profile                      show implemented online statistics
@@ -101,11 +104,18 @@ pub enum Command {
         #[command(subcommand)]
         command: Option<IntegrationsCommand>,
     },
-    /// Sign in to MVP with GitHub Device Flow
-    Login,
+    /// Sign in through the MVP website
+    Login {
+        /// Use GitHub Device Flow instead of browser handoff
+        #[arg(long, conflicts_with = "email")]
+        github: bool,
+        /// Use an email magic link instead of browser handoff
+        #[arg(long, value_name = "ADDRESS", conflicts_with = "github")]
+        email: Option<String>,
+    },
     /// Revoke the MVP session and remove it from the credential store
     Logout,
-    /// Show the local player and linked GitHub identity
+    /// Show the local player and online identity
     Whoami,
     /// Show online ranks and game statistics
     Profile,
@@ -392,8 +402,37 @@ mod tests {
     fn online_commands_parse() {
         assert!(matches!(
             parse(&["mvp", "login"]).command,
-            Some(Command::Login)
+            Some(Command::Login {
+                github: false,
+                email: None
+            })
         ));
+        assert!(matches!(
+            parse(&["mvp", "login", "--github"]).command,
+            Some(Command::Login {
+                github: true,
+                email: None
+            })
+        ));
+        assert!(matches!(
+            parse(&["mvp", "login", "--email", "user@example.com"]).command,
+            Some(Command::Login {
+                github: false,
+                email: Some(email)
+            }) if email == "user@example.com"
+        ));
+        assert!(
+            Cli::try_parse_from(["mvp", "login", "--github", "--email", "user@example.com"])
+                .is_err()
+        );
+        let mut login = Cli::command();
+        let login = login
+            .find_subcommand_mut("login")
+            .expect("login subcommand")
+            .render_long_help()
+            .to_string();
+        assert!(login.contains("MVP website"));
+        assert!(login.contains("instead of browser handoff"));
         assert!(matches!(
             parse(&["mvp", "logout"]).command,
             Some(Command::Logout)

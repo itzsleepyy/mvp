@@ -6,7 +6,7 @@ A competitive terminal arcade for the time between coding-agent prompts.
 
 MVP turns the short waits while Claude Code, Codex, Gemini CLI, or OpenCode works into quick terminal games. Agent lifecycle integrations pause the game when an agent needs attention and let you return to work without losing a run.
 
-Local play works without an account. GitHub sign-in adds global score submission, ranks, and the Daily MVP competition; game traffic never includes source code, prompts, repositories, terminal contents, or coding-agent output.
+Local play works without an account. GitHub or email sign-in adds global score submission, ranks, and the Daily MVP competition; game traffic never includes source code, prompts, repositories, terminal contents, or coding-agent output.
 
 ## Games
 
@@ -37,6 +37,8 @@ See [Agent Integrations](docs/agent-integrations.md) for lifecycle mappings, beh
 
 ```bash
 mvp login
+mvp login --github
+mvp login --email you@example.com
 mvp whoami
 mvp profile
 mvp leaderboard
@@ -45,7 +47,7 @@ mvp leaderboard stack-overflow
 mvp logout
 ```
 
-GitHub login uses Device Flow and stores the MVP session in the operating system credential store. Failed authenticated run submissions are queued locally and retried without interrupting play. Press `L` on the main menu to open Daily MVP; local games remain available when the service is offline.
+`mvp login` opens the MVP website, where you can continue with GitHub or an email magic link, then securely hands a separate session back to the terminal. The explicit `--github` and `--email` options run those provider flows directly as fallbacks. MVP stores only the resulting session in the operating system credential store. Press `I` on the main menu to start the same browser sign-in flow without leaving the application. Failed authenticated run submissions are queued locally and retried without interrupting play. Press `L` to open Daily MVP; local games remain available when the service is offline.
 
 ## Installation
 
@@ -71,6 +73,7 @@ Legacy compatibility: pre-rebrand `WaitState` score files are copied into the MV
 | `Backspace` | Delete the last character |
 | `N` | Change player name from the main menu |
 | `L` | View the online Daily MVP leaderboard |
+| `I` | Sign in or view the online account action from the main menu |
 | `P` | Pause or resume manually |
 | `R` | Restart after game over |
 | `ESC` | Go back or cancel a rename; the first-run name prompt is required |

@@ -13,6 +13,7 @@ import { Type, type Static } from "@sinclair/typebox";
 import type pg from "pg";
 import type { Config } from "./config.js";
 import type { Database } from "./db.js";
+import { cloudflareEmailProvider, type EmailProvider } from "./email.js";
 import { officialGithubProvider, type GithubProvider } from "./github.js";
 import {
   normalizeRun,
@@ -49,6 +50,7 @@ interface AppOptions {
   config: Config;
   db: Database;
   github?: GithubProvider;
+  email?: EmailProvider;
   now?: () => Date;
 }
 
@@ -76,6 +78,7 @@ const ErrorResponses = {
   409: ErrorSchema,
   422: ErrorSchema,
   429: ErrorSchema,
+  503: ErrorSchema,
 };
 const hash = (token: string): string =>
   createHash("sha256").update(token).digest("hex");
@@ -117,6 +120,24 @@ function deviceSessionToken(pollToken: string, secret: string): string {
   return createHmac("sha256", secret)
     .update(`device-session:${pollToken}`)
     .digest("base64url");
+}
+
+function emailSessionToken(pollTokenHash: string, secret: string): string {
+  return createHmac("sha256", secret)
+    .update(`email-session:${pollTokenHash}`)
+    .digest("base64url");
+}
+
+function handoffSessionToken(pollTokenHash: string, secret: string): string {
+  return createHmac("sha256", secret)
+    .update(`handoff-session:${pollTokenHash}`)
+    .digest("base64url");
+}
+
+function emailUsername(email: string, attempt: number): string {
+  const digest = hash(email);
+  if (attempt === 0) return `player-${digest.slice(0, 8)}`;
+  return `player-${digest.slice(0, 8)}-${hash(`${email}:${String(attempt)}`).slice(0, 8)}`;
 }
 
 function sendError(
@@ -193,6 +214,16 @@ export async function buildApp(options: AppOptions) {
     github = officialGithubProvider,
     now = () => new Date(),
   } = options;
+  const email =
+    options.email ??
+    (config.emailAuthEnabled &&
+    config.cloudflareAccountId &&
+    config.cloudflareEmailApiToken
+      ? cloudflareEmailProvider(
+          config.cloudflareAccountId,
+          config.cloudflareEmailApiToken,
+        )
+      : undefined);
   const app = Fastify({
     trustProxy: config.trustProxy,
     logger: {
@@ -200,6 +231,8 @@ export async function buildApp(options: AppOptions) {
       redact: [
         "req.headers.authorization",
         "req.body.poll_token",
+        "req.body.browser_token",
+        "req.body.email",
         "req.body.token",
         "device_code",
         "access_token",
@@ -326,6 +359,228 @@ export async function buildApp(options: AppOptions) {
     { poll_token: Type.String({ minLength: 20, maxLength: 100 }) },
     { additionalProperties: false },
   );
+
+  type HandoffRow = {
+    poll_token_hash: string;
+    interval_seconds: number;
+    next_poll_at: Date;
+    expires_at: Date;
+    completed_user_id: string | null;
+    completed_session_expires_at: Date | null;
+  };
+  const BrowserTokenBody = Type.Object(
+    { browser_token: Type.String({ minLength: 20, maxLength: 100 }) },
+    { additionalProperties: false },
+  );
+  app.post(
+    "/v1/auth/handoff/start",
+    {
+      config: { rateLimit: { max: 5, timeWindow: "1 minute" } },
+      schema: {
+        response: {
+          201: Type.Object({
+            flow_token: Type.String(),
+            verification_uri: Type.String({ format: "uri" }),
+            expires_in: Type.Integer(),
+            interval: Type.Integer(),
+          }),
+          ...ErrorResponses,
+        },
+      },
+    },
+    async (_request, reply) => {
+      const pollToken = opaqueToken();
+      const browserToken = opaqueToken();
+      const current = now();
+      const expiresIn = 10 * 60;
+      const interval = 3;
+      await db.query(
+        `INSERT INTO login_handoffs(
+           id, poll_token_hash, browser_token_hash, interval_seconds,
+           next_poll_at, expires_at
+         ) VALUES ($1, $2, $3, $4, $5, $6)`,
+        [
+          randomUUID(),
+          hash(pollToken),
+          hash(browserToken),
+          interval,
+          new Date(current.getTime() + interval * 1_000),
+          new Date(current.getTime() + expiresIn * 1_000),
+        ],
+      );
+      const verificationUrl = new URL("/sign-in", config.websiteUrl);
+      verificationUrl.searchParams.set("handoff", browserToken);
+      return reply.status(201).send({
+        flow_token: pollToken,
+        verification_uri: verificationUrl.toString(),
+        expires_in: expiresIn,
+        interval,
+      });
+    },
+  );
+
+  app.post(
+    "/v1/auth/handoff/complete",
+    {
+      preHandler: authenticate,
+      schema: {
+        body: BrowserTokenBody,
+        response: { 204: Type.Null(), ...ErrorResponses },
+      },
+    },
+    async (request, reply) => {
+      const browserTokenHash = hash(request.body.browser_token);
+      const client = await db.connect();
+      try {
+        await client.query("BEGIN");
+        const result = await client.query<HandoffRow>(
+          `SELECT poll_token_hash, interval_seconds, next_poll_at, expires_at,
+                  completed_user_id, completed_session_expires_at
+           FROM login_handoffs WHERE browser_token_hash = $1 FOR UPDATE`,
+          [browserTokenHash],
+        );
+        const handoff = result.rows[0];
+        const current = now();
+        if (!handoff || handoff.expires_at <= current) {
+          if (handoff)
+            await client.query(
+              "DELETE FROM login_handoffs WHERE browser_token_hash = $1",
+              [browserTokenHash],
+            );
+          await client.query("COMMIT");
+          return await sendError(
+            reply,
+            404,
+            "flow_expired",
+            "The login handoff expired or does not exist",
+          );
+        }
+        if (handoff.completed_user_id) {
+          await client.query("COMMIT");
+          if (handoff.completed_user_id === request.authUser.id)
+            return await reply.status(204).send(null);
+          return await sendError(
+            reply,
+            409,
+            "handoff_conflict",
+            "The login handoff was completed by another user",
+          );
+        }
+
+        const sessionToken = handoffSessionToken(
+          handoff.poll_token_hash,
+          config.sessionSecret,
+        );
+        const sessionExpires = new Date(
+          current.getTime() + config.sessionTtlDays * 86_400_000,
+        );
+        await client.query(
+          `INSERT INTO sessions(id, user_id, token_hash, expires_at)
+           VALUES ($1, $2, $3, $4) ON CONFLICT (token_hash) DO NOTHING`,
+          [
+            randomUUID(),
+            request.authUser.id,
+            hash(sessionToken),
+            sessionExpires,
+          ],
+        );
+        await client.query(
+          `UPDATE login_handoffs
+           SET completed_user_id = $2, completed_session_expires_at = $3
+           WHERE browser_token_hash = $1`,
+          [browserTokenHash, request.authUser.id, sessionExpires],
+        );
+        await client.query("COMMIT");
+        return await reply.status(204).send(null);
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      } finally {
+        client.release();
+      }
+    },
+  );
+
+  app.post(
+    "/v1/auth/handoff/poll",
+    {
+      config: { rateLimit: { max: 60, timeWindow: "1 minute" } },
+      schema: {
+        body: PollBody,
+        response: {
+          200: SessionSchema,
+          202: Type.Object({
+            status: Type.Literal("pending"),
+            retry_after: Type.Integer(),
+          }),
+          ...ErrorResponses,
+        },
+      },
+    },
+    async (request, reply) => {
+      const pollTokenHash = hash(request.body.poll_token);
+      const current = now();
+      const claimed = await db.query<HandoffRow>(
+        `UPDATE login_handoffs
+         SET next_poll_at = $2 + interval_seconds * interval '1 second'
+         WHERE poll_token_hash = $1 AND completed_user_id IS NULL
+           AND next_poll_at <= $2 AND expires_at > $2
+         RETURNING poll_token_hash, interval_seconds, next_poll_at, expires_at,
+                   completed_user_id, completed_session_expires_at`,
+        [pollTokenHash, current],
+      );
+      let handoff = claimed.rows[0];
+      if (!handoff) {
+        const existing = await db.query<HandoffRow>(
+          `SELECT poll_token_hash, interval_seconds, next_poll_at, expires_at,
+                  completed_user_id, completed_session_expires_at
+           FROM login_handoffs WHERE poll_token_hash = $1`,
+          [pollTokenHash],
+        );
+        handoff = existing.rows[0];
+      }
+      if (!handoff || handoff.expires_at <= current) {
+        await db.query(
+          "DELETE FROM login_handoffs WHERE poll_token_hash = $1",
+          [pollTokenHash],
+        );
+        return sendError(
+          reply,
+          404,
+          "flow_expired",
+          "The login handoff expired or does not exist",
+        );
+      }
+      if (!handoff.completed_user_id || !handoff.completed_session_expires_at) {
+        const retryAfter = claimed.rows[0]
+          ? handoff.interval_seconds
+          : Math.max(
+              1,
+              Math.ceil(
+                (handoff.next_poll_at.getTime() - current.getTime()) / 1_000,
+              ),
+            );
+        return reply
+          .status(202)
+          .send({ status: "pending", retry_after: retryAfter });
+      }
+      const users = await db.query<AuthUser>(
+        "SELECT id, username, display_name, avatar_url FROM users WHERE id = $1",
+        [handoff.completed_user_id],
+      );
+      const user = users.rows[0];
+      if (!user) throw new Error("Completed login handoff user is missing");
+      return {
+        token: handoffSessionToken(
+          handoff.poll_token_hash,
+          config.sessionSecret,
+        ),
+        expires_at: handoff.completed_session_expires_at.toISOString(),
+        user: profile(user),
+      };
+    },
+  );
+
   app.post(
     "/v1/auth/github/poll",
     {
@@ -463,6 +718,12 @@ export async function buildApp(options: AppOptions) {
         );
         const user = users.rows[0];
         if (!user) throw new Error("User upsert returned no row");
+        await client.query(
+          `INSERT INTO auth_identities(id, user_id, provider, provider_subject)
+           VALUES ($1, $2, 'github', $3)
+           ON CONFLICT (provider, provider_subject) DO NOTHING`,
+          [randomUUID(), user.id, String(githubUser.id)],
+        );
         const sessionToken = deviceSessionToken(
           request.body.poll_token,
           config.sessionSecret,
@@ -493,6 +754,377 @@ export async function buildApp(options: AppOptions) {
       } finally {
         client.release();
       }
+    },
+  );
+
+  const EmailStartBody = Type.Object(
+    {
+      email: Type.String({ minLength: 3, maxLength: 512 }),
+      browser_token: Type.Optional(
+        Type.String({ minLength: 20, maxLength: 100 }),
+      ),
+    },
+    { additionalProperties: false },
+  );
+  const EmailTokenBody = Type.Object(
+    { token: Type.String({ minLength: 20, maxLength: 100 }) },
+    { additionalProperties: false },
+  );
+  app.post(
+    "/v1/auth/email/start",
+    {
+      config: { rateLimit: { max: 5, timeWindow: "1 minute" } },
+      schema: {
+        body: EmailStartBody,
+        response: {
+          201: Type.Object({
+            flow_token: Type.String(),
+            expires_in: Type.Integer(),
+            interval: Type.Integer(),
+          }),
+          ...ErrorResponses,
+        },
+      },
+    },
+    async (request, reply) => {
+      if (!config.emailAuthEnabled || !email || !config.emailFrom)
+        return sendError(
+          reply,
+          503,
+          "email_auth_unavailable",
+          "Email authentication is temporarily unavailable",
+        );
+      const normalized = request.body.email.trim().toLowerCase();
+      if (
+        normalized.length > 254 ||
+        !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalized)
+      )
+        return sendError(
+          reply,
+          400,
+          "invalid_email",
+          "A valid email address is required",
+        );
+
+      if (request.body.browser_token) {
+        const handoffs = await db.query<{
+          expires_at: Date;
+          completed_user_id: string | null;
+        }>(
+          `SELECT expires_at, completed_user_id FROM login_handoffs
+           WHERE browser_token_hash = $1`,
+          [hash(request.body.browser_token)],
+        );
+        const handoff = handoffs.rows[0];
+        if (!handoff || handoff.expires_at <= now())
+          return sendError(
+            reply,
+            404,
+            "flow_expired",
+            "The login handoff expired or does not exist",
+          );
+        if (handoff.completed_user_id)
+          return sendError(
+            reply,
+            400,
+            "handoff_completed",
+            "The login handoff is already completed",
+          );
+      }
+
+      const pollToken = opaqueToken();
+      const verificationToken = opaqueToken();
+      const current = now();
+      const expiresIn = 15 * 60;
+      const interval = 3;
+      const pollTokenHash = hash(pollToken);
+      await db.query(
+        `INSERT INTO email_auth_flows(
+           id, poll_token_hash, verification_token_hash, email_normalized,
+           interval_seconds, next_poll_at, expires_at
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+        [
+          randomUUID(),
+          pollTokenHash,
+          hash(verificationToken),
+          normalized,
+          interval,
+          new Date(current.getTime() + interval * 1_000),
+          new Date(current.getTime() + expiresIn * 1_000),
+        ],
+      );
+      const verificationUrl = new URL("/auth/email/verify", config.websiteUrl);
+      verificationUrl.searchParams.set("token", verificationToken);
+      if (request.body.browser_token)
+        verificationUrl.searchParams.set("handoff", request.body.browser_token);
+      const link = verificationUrl.toString();
+      try {
+        await email.send({
+          from: config.emailFrom,
+          to: normalized,
+          subject: "Sign in to MVP",
+          text: `Sign in to MVP: ${link}\n\nThis link expires in 15 minutes.`,
+          html: `<p><a href="${link}">Sign in to MVP</a></p><p>This link expires in 15 minutes.</p>`,
+        });
+      } catch {
+        await db.query(
+          "DELETE FROM email_auth_flows WHERE poll_token_hash = $1",
+          [pollTokenHash],
+        );
+        return sendError(
+          reply,
+          503,
+          "email_delivery_failed",
+          "Email authentication is temporarily unavailable",
+        );
+      }
+      return reply.status(201).send({
+        flow_token: pollToken,
+        expires_in: expiresIn,
+        interval,
+      });
+    },
+  );
+
+  type EmailFlowRow = {
+    poll_token_hash: string;
+    email_normalized: string;
+    interval_seconds: number;
+    next_poll_at: Date;
+    expires_at: Date;
+    completed_user_id: string | null;
+    completed_session_expires_at: Date | null;
+  };
+  app.post(
+    "/v1/auth/email/verify",
+    {
+      schema: {
+        body: EmailTokenBody,
+        response: { 200: SessionSchema, ...ErrorResponses },
+      },
+    },
+    async (request, reply) => {
+      if (!config.emailAuthEnabled)
+        return sendError(
+          reply,
+          503,
+          "email_auth_unavailable",
+          "Email authentication is temporarily unavailable",
+        );
+      const client = await db.connect();
+      try {
+        await client.query("BEGIN");
+        const flows = await client.query<EmailFlowRow>(
+          `SELECT poll_token_hash, email_normalized, interval_seconds,
+                  next_poll_at, expires_at, completed_user_id,
+                  completed_session_expires_at
+           FROM email_auth_flows WHERE verification_token_hash = $1 FOR UPDATE`,
+          [hash(request.body.token)],
+        );
+        const flow = flows.rows[0];
+        const current = now();
+        if (!flow || flow.expires_at <= current) {
+          if (flow)
+            await client.query(
+              "DELETE FROM email_auth_flows WHERE verification_token_hash = $1",
+              [hash(request.body.token)],
+            );
+          await client.query("COMMIT");
+          return await sendError(
+            reply,
+            404,
+            "flow_expired",
+            "The email flow expired or does not exist",
+          );
+        }
+
+        let user: AuthUser | undefined;
+        if (flow.completed_user_id) {
+          const users = await client.query<AuthUser>(
+            "SELECT id, username, display_name, avatar_url FROM users WHERE id = $1",
+            [flow.completed_user_id],
+          );
+          user = users.rows[0];
+        } else {
+          await client.query(
+            "SELECT pg_advisory_xact_lock(hashtext('email-identity:' || $1))",
+            [flow.email_normalized],
+          );
+          const identities = await client.query<AuthUser>(
+            `SELECT u.id, u.username, u.display_name, u.avatar_url
+             FROM auth_identities i JOIN users u ON u.id = i.user_id
+             WHERE i.provider = 'email' AND i.provider_subject = $1`,
+            [flow.email_normalized],
+          );
+          user = identities.rows[0];
+          if (!user) {
+            for (let attempt = 0; attempt < 100 && !user; attempt += 1) {
+              const username = emailUsername(flow.email_normalized, attempt);
+              const inserted = await client.query<AuthUser>(
+                `INSERT INTO users(id, username, display_name)
+                 VALUES ($1, $2, $2) ON CONFLICT DO NOTHING
+                 RETURNING id, username, display_name, avatar_url`,
+                [randomUUID(), username],
+              );
+              user = inserted.rows[0];
+            }
+            if (!user) throw new Error("Could not allocate an email username");
+            await client.query(
+              `INSERT INTO auth_identities(
+                 id, user_id, provider, provider_subject,
+                 email_normalized, email_verified_at
+               ) VALUES ($1, $2, 'email', $3, $3, $4)`,
+              [randomUUID(), user.id, flow.email_normalized, current],
+            );
+          } else {
+            await client.query(
+              `UPDATE auth_identities SET email_verified_at = COALESCE(email_verified_at, $2), updated_at = $2
+               WHERE provider = 'email' AND provider_subject = $1`,
+              [flow.email_normalized, current],
+            );
+          }
+        }
+        if (!user) throw new Error("Completed email flow user is missing");
+
+        const token = emailSessionToken(
+          flow.poll_token_hash,
+          config.sessionSecret,
+        );
+        let sessionExpires = flow.completed_session_expires_at;
+        if (!sessionExpires) {
+          sessionExpires = new Date(
+            current.getTime() + config.sessionTtlDays * 86_400_000,
+          );
+          await client.query(
+            `INSERT INTO sessions(id, user_id, token_hash, expires_at)
+             VALUES ($1, $2, $3, $4) ON CONFLICT (token_hash) DO NOTHING`,
+            [randomUUID(), user.id, hash(token), sessionExpires],
+          );
+          await client.query(
+            `UPDATE email_auth_flows
+             SET completed_user_id = $2, completed_session_expires_at = $3
+             WHERE poll_token_hash = $1`,
+            [flow.poll_token_hash, user.id, sessionExpires],
+          );
+        }
+        await client.query("COMMIT");
+        return {
+          token,
+          expires_at: sessionExpires.toISOString(),
+          user: profile(user),
+        };
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      } finally {
+        client.release();
+      }
+    },
+  );
+
+  const EmailPollBody = Type.Object(
+    { poll_token: Type.String({ minLength: 20, maxLength: 100 }) },
+    { additionalProperties: false },
+  );
+  app.post(
+    "/v1/auth/email/poll",
+    {
+      config: { rateLimit: { max: 60, timeWindow: "1 minute" } },
+      schema: {
+        body: EmailPollBody,
+        response: {
+          200: SessionSchema,
+          202: Type.Object({
+            status: Type.Literal("pending"),
+            retry_after: Type.Integer(),
+          }),
+          ...ErrorResponses,
+        },
+      },
+    },
+    async (request, reply) => {
+      if (!config.emailAuthEnabled)
+        return sendError(
+          reply,
+          503,
+          "email_auth_unavailable",
+          "Email authentication is temporarily unavailable",
+        );
+      const pollTokenHash = hash(request.body.poll_token);
+      const current = now();
+      const claimed = await db.query<EmailFlowRow>(
+        `UPDATE email_auth_flows
+         SET next_poll_at = $2 + interval_seconds * interval '1 second'
+         WHERE poll_token_hash = $1 AND next_poll_at <= $2 AND expires_at > $2
+         RETURNING poll_token_hash, email_normalized, interval_seconds,
+                   next_poll_at, expires_at, completed_user_id,
+                   completed_session_expires_at`,
+        [pollTokenHash, current],
+      );
+      let flow = claimed.rows[0];
+      if (!flow) {
+        const existing = await db.query<EmailFlowRow>(
+          `SELECT poll_token_hash, email_normalized, interval_seconds,
+                  next_poll_at, expires_at, completed_user_id,
+                  completed_session_expires_at
+           FROM email_auth_flows WHERE poll_token_hash = $1`,
+          [pollTokenHash],
+        );
+        flow = existing.rows[0];
+        if (!flow || flow.expires_at <= current) {
+          await db.query(
+            "DELETE FROM email_auth_flows WHERE poll_token_hash = $1",
+            [pollTokenHash],
+          );
+          return sendError(
+            reply,
+            404,
+            "flow_expired",
+            "The email flow expired or does not exist",
+          );
+        }
+        if (flow.completed_user_id && flow.completed_session_expires_at) {
+          const users = await db.query<AuthUser>(
+            "SELECT id, username, display_name, avatar_url FROM users WHERE id = $1",
+            [flow.completed_user_id],
+          );
+          const user = users.rows[0];
+          if (!user) throw new Error("Completed email flow user is missing");
+          return {
+            token: emailSessionToken(
+              flow.poll_token_hash,
+              config.sessionSecret,
+            ),
+            expires_at: flow.completed_session_expires_at.toISOString(),
+            user: profile(user),
+          };
+        }
+        return reply.status(202).send({
+          status: "pending",
+          retry_after: Math.max(
+            1,
+            Math.ceil(
+              (flow.next_poll_at.getTime() - current.getTime()) / 1_000,
+            ),
+          ),
+        });
+      }
+      if (!flow.completed_user_id || !flow.completed_session_expires_at)
+        return reply.status(202).send({
+          status: "pending",
+          retry_after: flow.interval_seconds,
+        });
+      const users = await db.query<AuthUser>(
+        "SELECT id, username, display_name, avatar_url FROM users WHERE id = $1",
+        [flow.completed_user_id],
+      );
+      const user = users.rows[0];
+      if (!user) throw new Error("Completed email flow user is missing");
+      return {
+        token: emailSessionToken(flow.poll_token_hash, config.sessionSecret),
+        expires_at: flow.completed_session_expires_at.toISOString(),
+        user: profile(user),
+      };
     },
   );
 

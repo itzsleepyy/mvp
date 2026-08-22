@@ -6,6 +6,11 @@ export interface Config {
   port: number;
   databaseUrl: string;
   githubClientId: string;
+  emailAuthEnabled: boolean;
+  cloudflareAccountId: string | null;
+  cloudflareEmailApiToken: string | null;
+  emailFrom: string | null;
+  websiteUrl: string;
   sessionSecret: string;
   sessionTtlDays: number;
   logLevel: string;
@@ -49,12 +54,62 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env): Config {
   if (trustProxy !== "true" && trustProxy !== "false")
     throw new Error("TRUST_PROXY must be true or false");
 
+  const optional = (value: string | undefined): string | undefined =>
+    value?.trim() || undefined;
+  const emailAuthEnabledValue = env.EMAIL_AUTH_ENABLED ?? "false";
+  if (emailAuthEnabledValue !== "true" && emailAuthEnabledValue !== "false")
+    throw new Error("EMAIL_AUTH_ENABLED must be true or false");
+  const emailAuthEnabled = emailAuthEnabledValue === "true";
+  const cloudflareAccountId = optional(env.CLOUDFLARE_ACCOUNT_ID);
+  const cloudflareEmailApiToken = optional(env.CLOUDFLARE_EMAIL_API_TOKEN);
+  const emailFrom = optional(env.EMAIL_FROM);
+  const websiteUrl =
+    optional(env.WEBSITE_URL) ??
+    (nodeEnv === "production" ? undefined : "http://localhost:3001");
+  const emailValues = [cloudflareAccountId, cloudflareEmailApiToken, emailFrom];
+  const configuredEmailValues = emailValues.filter(
+    (value) => value !== undefined,
+  );
+  if (
+    configuredEmailValues.length !== 0 &&
+    configuredEmailValues.length !== emailValues.length
+  )
+    throw new Error(
+      "CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_EMAIL_API_TOKEN, and EMAIL_FROM must be configured together",
+    );
+  if (emailAuthEnabled && configuredEmailValues.length !== emailValues.length)
+    throw new Error(
+      "Cloudflare email settings are required when EMAIL_AUTH_ENABLED=true",
+    );
+  if (!websiteUrl)
+    throw new Error(
+      cloudflareAccountId
+        ? "WEBSITE_URL is required when email authentication is configured"
+        : "WEBSITE_URL is required in production",
+    );
+  if (websiteUrl) {
+    const website = new URL(websiteUrl);
+    if (website.protocol !== "http:" && website.protocol !== "https:")
+      throw new Error("WEBSITE_URL must be an HTTP(S) URL");
+    const loopback =
+      website.hostname === "localhost" ||
+      website.hostname === "127.0.0.1" ||
+      website.hostname === "[::1]";
+    if (nodeEnv === "production" && website.protocol !== "https:" && !loopback)
+      throw new Error("WEBSITE_URL must use HTTPS in production");
+  }
+
   return {
     nodeEnv,
     host: env.HOST ?? "127.0.0.1",
     port: integer("PORT", env.PORT, 3000, 1, 65_535),
     databaseUrl: env.DATABASE_URL,
     githubClientId: env.GITHUB_CLIENT_ID ?? "test-client",
+    emailAuthEnabled,
+    cloudflareAccountId: cloudflareAccountId ?? null,
+    cloudflareEmailApiToken: cloudflareEmailApiToken ?? null,
+    emailFrom: emailFrom ?? null,
+    websiteUrl: websiteUrl.replace(/\/+$/, ""),
     sessionSecret:
       env.SESSION_SECRET ?? "test-session-secret-at-least-32-chars",
     sessionTtlDays: integer(

@@ -77,6 +77,116 @@ pub struct DeviceFlow {
     pub interval: u64,
 }
 
+#[derive(Clone, Deserialize, PartialEq, Eq)]
+pub struct BrowserFlow {
+    #[serde(rename = "flow_token")]
+    poll_token: String,
+    pub verification_uri: String,
+    pub expires_in: u64,
+    pub interval: u64,
+}
+
+impl fmt::Debug for BrowserFlow {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("BrowserFlow")
+            .field("poll_token", &"[REDACTED]")
+            .field("verification_uri", &self.verification_uri)
+            .field("expires_in", &self.expires_in)
+            .field("interval", &self.interval)
+            .finish()
+    }
+}
+
+#[derive(Clone, Deserialize, PartialEq, Eq)]
+pub struct EmailFlow {
+    #[serde(rename = "flow_token")]
+    poll_token: String,
+    #[serde(skip)]
+    email: String,
+    pub expires_in: u64,
+    pub interval: u64,
+}
+
+impl EmailFlow {
+    pub fn email(&self) -> &str {
+        &self.email
+    }
+}
+
+impl fmt::Debug for EmailFlow {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EmailFlow")
+            .field("poll_token", &"[REDACTED]")
+            .field("email", &"[REDACTED]")
+            .field("expires_in", &self.expires_in)
+            .field("interval", &self.interval)
+            .finish()
+    }
+}
+
+pub trait PollingFlow {
+    fn poll_token(&self) -> &str;
+    fn poll_path(&self) -> &'static str;
+    fn expires_in(&self) -> u64;
+    fn interval(&self) -> u64;
+}
+
+impl PollingFlow for BrowserFlow {
+    fn poll_token(&self) -> &str {
+        &self.poll_token
+    }
+
+    fn poll_path(&self) -> &'static str {
+        "/v1/auth/handoff/poll"
+    }
+
+    fn expires_in(&self) -> u64 {
+        self.expires_in
+    }
+
+    fn interval(&self) -> u64 {
+        self.interval
+    }
+}
+
+impl PollingFlow for DeviceFlow {
+    fn poll_token(&self) -> &str {
+        &self.poll_token
+    }
+
+    fn poll_path(&self) -> &'static str {
+        "/v1/auth/github/poll"
+    }
+
+    fn expires_in(&self) -> u64 {
+        self.expires_in
+    }
+
+    fn interval(&self) -> u64 {
+        self.interval
+    }
+}
+
+impl PollingFlow for EmailFlow {
+    fn poll_token(&self) -> &str {
+        &self.poll_token
+    }
+
+    fn poll_path(&self) -> &'static str {
+        "/v1/auth/email/poll"
+    }
+
+    fn expires_in(&self) -> u64 {
+        self.expires_in
+    }
+
+    fn interval(&self) -> u64 {
+        self.interval
+    }
+}
+
 impl fmt::Debug for DeviceFlow {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -208,19 +318,45 @@ impl<S: CredentialStore> SessionManager<S> {
         Ok(flow)
     }
 
-    pub async fn poll_once(&self, flow: &DeviceFlow) -> Result<AuthFlow, ApiError> {
+    pub async fn start_browser(&self) -> Result<BrowserFlow, ApiError> {
+        self.client
+            .post::<(), _>("/v1/auth/handoff/start", None, None)
+            .await
+    }
+
+    pub async fn start_email(&self, email: &str) -> Result<EmailFlow, ApiError> {
+        #[derive(Serialize)]
+        struct StartEmail<'a> {
+            email: &'a str,
+        }
+
+        let email = email.trim();
+        if !valid_email_shape(email) {
+            return Err(ApiError::Validation {
+                code: "invalid_email".into(),
+                message: "enter an email address such as user@example.com".into(),
+            });
+        }
+        let mut flow: EmailFlow = self
+            .client
+            .post("/v1/auth/email/start", None, Some(&StartEmail { email }))
+            .await?;
+        flow.email = email.to_string();
+        Ok(flow)
+    }
+
+    pub async fn poll_once<F: PollingFlow>(&self, flow: &F) -> Result<AuthFlow, ApiError> {
         #[derive(Serialize)]
         struct Poll<'a> {
             poll_token: &'a str,
         }
 
-        let url = "/v1/auth/github/poll";
         let response = self
             .client
             .raw_post(
-                url,
+                flow.poll_path(),
                 &Poll {
-                    poll_token: &flow.poll_token,
+                    poll_token: flow.poll_token(),
                 },
             )
             .await?;
@@ -274,6 +410,20 @@ impl<S: CredentialStore> SessionManager<S> {
     }
 }
 
+fn valid_email_shape(email: &str) -> bool {
+    let email = email.trim();
+    let Some((local, domain)) = email.split_once('@') else {
+        return false;
+    };
+    !local.is_empty()
+        && !domain.is_empty()
+        && !email.chars().any(char::is_whitespace)
+        && !domain.starts_with('.')
+        && !domain.ends_with('.')
+        && domain.contains('.')
+        && !domain.contains('@')
+}
+
 fn credential_api_error(error: CredentialError) -> ApiError {
     ApiError::Unavailable(error.to_string())
 }
@@ -289,23 +439,30 @@ mod tests {
     use super::*;
     use std::io::{Read, Write};
     use std::net::TcpListener;
+    use std::sync::mpsc;
     use std::thread;
 
     fn server(status: &str, body: String) -> String {
+        server_with_request(status, body).0
+    }
+
+    fn server_with_request(status: &str, body: String) -> (String, mpsc::Receiver<String>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let status = status.to_string();
+        let (request_tx, request_rx) = mpsc::channel();
         thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
             let mut buffer = [0; 8192];
-            let _ = stream.read(&mut buffer);
+            let count = stream.read(&mut buffer).unwrap();
+            let _ = request_tx.send(String::from_utf8_lossy(&buffer[..count]).into_owned());
             let response = format!(
                 "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                 body.len()
             );
             let _ = stream.write_all(response.as_bytes());
         });
-        format!("http://{address}")
+        (format!("http://{address}"), request_rx)
     }
 
     fn session(expires_at: DateTime<Utc>) -> Session {
@@ -370,5 +527,122 @@ mod tests {
         assert_eq!(actual.user, expected.user);
         assert_eq!(manager.load().unwrap().unwrap().user, expected.user);
         assert!(!format!("{flow:?}").contains("opaque-poll-token"));
+    }
+
+    #[tokio::test]
+    async fn browser_start_uses_handoff_endpoint_and_redacts_token() {
+        let body = serde_json::json!({
+            "flow_token": "browser-poll-token",
+            "verification_uri": "https://mvp.dev/sign-in?flow=public",
+            "expires_in": 600,
+            "interval": 3
+        });
+        let (url, request) = server_with_request("201 Created", body.to_string());
+        let manager = SessionManager::new(
+            ApiClient::new(&url).unwrap(),
+            MemoryCredentialStore::default(),
+        );
+
+        let flow = manager.start_browser().await.unwrap();
+
+        assert_eq!(flow.verification_uri, "https://mvp.dev/sign-in?flow=public");
+        assert_eq!(flow.expires_in, 600);
+        let debug = format!("{flow:?}");
+        assert!(debug.contains(&flow.verification_uri));
+        assert!(!debug.contains("browser-poll-token"));
+        assert!(
+            request
+                .recv()
+                .unwrap()
+                .starts_with("POST /v1/auth/handoff/start HTTP/1.1")
+        );
+    }
+
+    #[tokio::test]
+    async fn browser_poll_uses_handoff_endpoint_and_persists_session() {
+        let expected = session(Utc::now() + chrono::Duration::hours(1));
+        let (url, request) =
+            server_with_request("200 OK", serde_json::to_string(&expected).unwrap());
+        let store = MemoryCredentialStore::default();
+        let manager = SessionManager::new(ApiClient::new(&url).unwrap(), store);
+        let flow = BrowserFlow {
+            poll_token: "browser-poll-token".into(),
+            verification_uri: "https://mvp.dev/sign-in".into(),
+            expires_in: 600,
+            interval: 3,
+        };
+
+        let AuthFlow::Complete(actual) = manager.poll_once(&flow).await.unwrap() else {
+            panic!("expected completed browser flow");
+        };
+        assert_eq!(actual.user, expected.user);
+        assert_eq!(manager.load().unwrap().unwrap().user, expected.user);
+        let request = request.recv().unwrap();
+        assert!(request.starts_with("POST /v1/auth/handoff/poll HTTP/1.1"));
+        assert!(request.contains(r#"{"poll_token":"browser-poll-token"}"#));
+    }
+
+    #[tokio::test]
+    async fn email_start_validates_shape_and_redacts_sensitive_fields() {
+        let manager = SessionManager::new(
+            ApiClient::new("http://127.0.0.1:1").unwrap(),
+            MemoryCredentialStore::default(),
+        );
+        for invalid in [
+            "",
+            "user",
+            "@example.com",
+            "user@localhost",
+            "a b@example.com",
+        ] {
+            assert!(matches!(
+                manager.start_email(invalid).await,
+                Err(ApiError::Validation { code, .. }) if code == "invalid_email"
+            ));
+        }
+
+        let body = serde_json::json!({
+            "flow_token": "email-poll-token",
+            "expires_in": 600,
+            "interval": 3
+        });
+        let (url, request) = server_with_request("201 Created", body.to_string());
+        let manager = SessionManager::new(
+            ApiClient::new(&url).unwrap(),
+            MemoryCredentialStore::default(),
+        );
+        let flow = manager.start_email(" user@example.com ").await.unwrap();
+        assert_eq!(flow.email(), "user@example.com");
+        assert_eq!(flow.expires_in, 600);
+        let debug = format!("{flow:?}");
+        assert!(!debug.contains("user@example.com"));
+        assert!(!debug.contains("email-poll-token"));
+        let request = request.recv().unwrap();
+        assert!(request.starts_with("POST /v1/auth/email/start HTTP/1.1"));
+        assert!(request.contains(r#"{"email":"user@example.com"}"#));
+    }
+
+    #[tokio::test]
+    async fn email_poll_completion_uses_shared_polling_and_persists_session() {
+        let expected = session(Utc::now() + chrono::Duration::hours(1));
+        let (url, request) =
+            server_with_request("200 OK", serde_json::to_string(&expected).unwrap());
+        let store = MemoryCredentialStore::default();
+        let manager = SessionManager::new(ApiClient::new(&url).unwrap(), store);
+        let flow = EmailFlow {
+            poll_token: "email-poll-token".into(),
+            email: "user@example.com".into(),
+            expires_in: 600,
+            interval: 3,
+        };
+
+        let AuthFlow::Complete(actual) = manager.poll_once(&flow).await.unwrap() else {
+            panic!("expected completed email flow");
+        };
+        assert_eq!(actual.user, expected.user);
+        assert_eq!(manager.load().unwrap().unwrap().user, expected.user);
+        let request = request.recv().unwrap();
+        assert!(request.starts_with("POST /v1/auth/email/poll HTTP/1.1"));
+        assert!(request.contains(r#"{"poll_token":"email-poll-token"}"#));
     }
 }

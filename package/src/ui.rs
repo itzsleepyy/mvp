@@ -64,14 +64,14 @@ const DOH_LOGO: [&str; 16] = [
     "M:::::::M             M:::::::MV::::::V           V::::::VP::::::::::::::::P",
     "M::::::::M           M::::::::MV::::::V           V::::::VP::::::PPPPPP:::::P",
     "M:::::::::M         M:::::::::MV::::::V           V::::::VPP:::::P     P:::::P",
-    "M::::::::::M       M::::::::::M V:::::V           V:::::V   P::::P     P:::::P",
-    "M:::::::::::M     M:::::::::::M  V:::::V         V:::::V    P::::P     P:::::P",
-    "M:::::::M::::M   M::::M:::::::M   V:::::V       V:::::V     P::::PPPPPP:::::P",
-    "M::::::M M::::M M::::M M::::::M    V:::::V     V:::::V      P:::::::::::::PP",
-    "M::::::M  M::::M::::M  M::::::M     V:::::V   V:::::V       P::::PPPPPPPPP",
-    "M::::::M   M:::::::M   M::::::M      V:::::V V:::::V        P::::P",
-    "M::::::M    M:::::M    M::::::M       V:::::V:::::V         P::::P",
-    "M::::::M     MMMMM     M::::::M        V:::::::::V          P::::P",
+    "M::::::::::M       M::::::::::M V:::::V           V:::::V  PP::::P     P:::::P",
+    "M:::::::::::M     M:::::::::::M  V:::::V         V:::::V   PP::::P     P:::::P",
+    "M:::::::M::::M   M::::M:::::::M   V:::::V       V:::::V    PP::::PPPPPP:::::P",
+    "M::::::M M::::M M::::M M::::::M    V:::::V     V:::::V     PP:::::::::::::PP",
+    "M::::::M  M::::M::::M  M::::::M     V:::::V   V:::::V      PP::::PPPPPPPPP",
+    "M::::::M   M:::::::M   M::::::M      V:::::V V:::::V       PP::::PP",
+    "M::::::M    M:::::M    M::::::M       V:::::V:::::V        PP::::PP",
+    "M::::::M     MMMMM     M::::::M        V:::::::::V         PP::::PP",
     "M::::::M               M::::::M         V:::::::V         PP::::::PP",
     "M::::::M               M::::::M          V:::::V          P::::::::P",
     "M::::::M               M::::::M           V:::V           P::::::::P",
@@ -94,9 +94,16 @@ fn render_menu(frame: &mut Frame, app: &App) {
 
     let mut lines: Vec<Line<'_>> = Vec::new();
     if area.width as usize >= DOH_LOGO_WIDTH && area.height >= DOH_MIN_ROWS {
-        lines.extend(DOH_LOGO.iter().map(|row| Line::styled(*row, logo)));
+        lines.extend(
+            DOH_LOGO
+                .iter()
+                .map(|row| Line::styled(format!("{row:<DOH_LOGO_WIDTH$}"), logo)),
+        );
     } else if wide {
-        lines.extend(LOGO.iter().map(|row| Line::styled(*row, logo)));
+        lines.extend(
+            LOGO.iter()
+                .map(|row| Line::styled(format!("{row:<LOGO_WIDTH$}"), logo)),
+        );
     } else {
         lines.push(Line::styled("M V P", logo));
     }
@@ -127,6 +134,10 @@ fn render_menu(frame: &mut Frame, app: &App) {
         lines.push(status_line);
         lines.push(Line::from(""));
     }
+    if let Some(message) = app.account_message() {
+        lines.push(Line::styled(message, dim));
+        lines.push(Line::from(""));
+    }
     lines.push(Line::styled("[ ENTER ] PLAY", green));
     if app.best_score() > 0 {
         lines.push(Line::from(""));
@@ -148,10 +159,17 @@ fn render_menu(frame: &mut Frame, app: &App) {
     .split(content);
     let paragraph = Paragraph::new(lines).alignment(Alignment::Center);
     frame.render_widget(paragraph, vertical[1]);
+    let account = if app.online_username().is_some() {
+        "[ I ] ACCOUNT"
+    } else {
+        "[ I ] SIGN IN"
+    };
     frame.render_widget(
-        Paragraph::new("[ L ] LEADERBOARD    [ N ] CHANGE NAME    [ Q ] QUIT")
-            .style(dim)
-            .alignment(Alignment::Center),
+        Paragraph::new(format!(
+            "[ L ] LEADERBOARD    {account}    [ N ] CHANGE NAME    [ Q ] QUIT"
+        ))
+        .style(dim)
+        .alignment(Alignment::Center),
         footer,
     );
 }
@@ -1199,6 +1217,7 @@ mod tests {
         assert!(text.contains("MOST VALUED PROGRAMMER"));
         assert!(text.contains("PLAY"));
         assert!(text.contains("QUIT"));
+        assert!(text.contains("[ I ] SIGN IN"));
     }
 
     #[test]
@@ -1264,6 +1283,19 @@ mod tests {
         );
 
         let rows: Vec<_> = text.lines().collect();
+        let logo_left_edges: Vec<_> = DOH_LOGO
+            .iter()
+            .map(|logo_row| {
+                rows.iter()
+                    .find(|row| row.contains(logo_row))
+                    .and_then(|row| row.find(logo_row))
+                    .expect("doh logo row")
+            })
+            .collect();
+        assert!(
+            logo_left_edges.windows(2).all(|edges| edges[0] == edges[1]),
+            "doh logo rows must share a left edge: {logo_left_edges:?}"
+        );
         let logo_y = rows
             .iter()
             .position(|row| row.contains(DOH_LOGO[0]))
@@ -1310,11 +1342,7 @@ mod tests {
         let name_cell = &buffer[(name_x, player_y as u16)];
         assert_eq!(name_cell.fg, Color::White);
         assert!(name_cell.modifier.contains(Modifier::BOLD));
-        assert!(
-            rows.last()
-                .unwrap()
-                .contains("[ L ] LEADERBOARD    [ N ] CHANGE NAME    [ Q ] QUIT")
-        );
+        assert!(rows.last().unwrap().contains("[ I ] SIGN IN"));
 
         app.start_game();
         app.game_mut()
@@ -1345,6 +1373,16 @@ mod tests {
             }),
             "today's MVP must render on one line"
         );
+    }
+
+    #[test]
+    fn signed_in_menu_advertises_account_action() {
+        let mut app = app_at(100, 30);
+        let (commands, _received) = std::sync::mpsc::channel();
+        app.configure_online(commands, Some("alex".into()));
+        let text = all_text(&render_buffer(&app, 100, 30));
+        assert!(text.contains("[ I ] ACCOUNT"));
+        assert!(!text.contains("[ I ] SIGN IN"));
     }
 
     #[test]

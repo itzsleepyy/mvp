@@ -54,7 +54,7 @@ export async function fetchLeaderboard(
   game: GameFilter,
 ): Promise<Leaderboard> {
   const baseUrl = (
-    process.env.NEXT_PUBLIC_MVP_API_URL ?? "http://localhost:3000"
+    process.env.MVP_API_URL ?? "http://localhost:3000"
   ).replace(/\/$/, "");
   const effectiveGame = period === "weekly" ? "overall" : game;
   const endpoint =

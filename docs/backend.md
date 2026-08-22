@@ -5,11 +5,12 @@ Phase 4B is a Node 22, strict TypeScript, Fastify, and PostgreSQL service in `ba
 ## Local workflow
 
 1. Create the official GitHub OAuth App used by MVP and enable Device Flow. No client secret is needed.
-2. Run `cp backend/.env.example backend/.env`, set `GITHUB_CLIENT_ID`, and generate a random `SESSION_SECRET` of at least 32 characters.
-3. Start PostgreSQL with `docker compose up -d postgres`.
-4. Run `cd backend && npm ci && npm run migrate && npm run dev`.
+2. Run `cp backend/.env.example backend/.env`, set `GITHUB_CLIENT_ID`, set `WEBSITE_URL` to the public website origin, and generate a random `SESSION_SECRET` of at least 32 characters.
+3. To enable email sign-in, verify a sending domain with Cloudflare Email Service and set `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_EMAIL_API_TOKEN`, and `EMAIL_FROM`. Omit all three to run GitHub-only.
+4. Start PostgreSQL with `docker compose up -d postgres`.
+5. Run `cd backend && npm ci && npm run migrate && npm run dev`.
 
-The migration runner applies ordered `migrations/*.sql` files transactionally and records them in `schema_migrations`. For the complete container stack, set `GITHUB_CLIENT_ID` in the shell and run `docker compose up --build`. The API listens on port 3000.
+The migration runner applies ordered `migrations/*.sql` files transactionally and records them in `schema_migrations`. For the complete local container stack, set `GITHUB_CLIENT_ID` and `SESSION_SECRET`; set the three email variables above to enable magic links, then run `docker compose up --build`. `WEBSITE_URL` defaults to `http://localhost:3001` in Compose. The API listens on port 3000 and the website on port 3001. Public deployments must set `WEBSITE_URL` and `NEXT_PUBLIC_SITE_URL` to the same HTTPS origin.
 
 Quality commands are `npm run format:check`, `npm run lint`, `npm run typecheck`, `npm test`, and `npm run build`. Database E2E tests use a disposable database supplied as `TEST_DATABASE_URL`, for example:
 
@@ -20,6 +21,8 @@ TEST_DATABASE_URL=postgres://mvp:mvp@localhost:5432/mvp_test npm run test:db
 Compose creates the disposable `mvp_test` database alongside the development database. The E2E suite refuses URLs that do not name `mvp_test`, truncates its application tables, and skips when `TEST_DATABASE_URL` is absent.
 
 ## Authentication
+
+The default terminal flow starts with `POST /v1/auth/handoff/start`. It returns a private polling token as `flow_token` and a `verification_uri` containing a separate browser capability. After the user authenticates on the website, authenticated `POST /v1/auth/handoff/complete` binds that user to the pending handoff. The terminal polls `POST /v1/auth/handoff/poll` and receives a distinct MVP session, so signing out of the website does not sign out the terminal. Handoffs expire after 10 minutes. Direct GitHub Device Flow and email polling remain available as explicit CLI fallbacks.
 
 `POST /v1/auth/github/device` takes no body. It starts GitHub's official Device Flow without a `scope` parameter. MVP uses a dedicated OAuth app that never requests broader scopes; GitHub may otherwise reuse scopes previously granted to the same OAuth app. The response is:
 
@@ -44,6 +47,8 @@ Compose creates the disposable `mvp_test` database alongside the development dat
 ```
 
 The backend encrypts active GitHub device codes at rest, exchanges the code, calls GitHub `/user`, and then discards the GitHub token. GitHub tokens are never persisted. MVP bearer tokens are opaque values; only their SHA-256 hashes are stored. A completed flow remains replayable for its short authorization lifetime so a dropped CLI response does not strand the session. Supply sessions as `Authorization: Bearer <token>`. `POST /v1/auth/logout` revokes the current session and returns 204. `GET /v1/me` returns identity plus Daily, Weekly, and global ranks, normalized best Stack Overflow score, current Daily PR streak, and successful Daily Fix days this week. A `POST /v1/auth/test` route exists only when `NODE_ENV=test`; it accepts `{"username":"e2e-user"}` and returns a session for credential-free E2E testing.
+
+Email authentication uses `POST /v1/auth/email/start` with `{"email":"you@example.com"}`. The backend stores only hashes of independent verification and polling tokens, sends a 15-minute link through Cloudflare Email Service, and returns `flow_token`, `expires_in`, and `interval`. The website exchanges the link at `POST /v1/auth/email/verify`; terminal clients poll `POST /v1/auth/email/poll` with `{"poll_token":"..."}`. Both receive the same replay-safe MVP session. Email addresses are never used as public usernames or returned in profiles; email identities receive a pseudonymous `player-<hash>` username. GitHub and email identities are never merged automatically.
 
 The CLI partitions credential-store entries by canonical API origin. Production credentials are never loaded for a development override, and cleartext HTTP is accepted only for loopback development URLs.
 
@@ -95,7 +100,7 @@ The initial validation boundary rejects Stack Overflow scores above 100,000 or n
 
 Leaderboard routes are public, default to 50 entries, and accept `limit=1..100`. Ties use shared competition rank (`1, 1, 3`). Display order is deterministic: points descending, then case-insensitive username, then user ID.
 
-Submitting a run publishes the account's GitHub username, avatar, and MVP points on these public boards. The backend does not request email or private-repository access.
+Submitting a run publishes the account's public username, optional avatar, and MVP points on these public boards. The backend does not request private-repository access and never publishes email addresses.
 
 - `GET /v1/leaderboards/daily?date=YYYY-MM-DD` sums each game's best normalized run on that UTC date. Date defaults to today.
 - `GET /v1/leaderboards/weekly` sums daily totals from the current UTC Monday through the current UTC date.
@@ -108,4 +113,4 @@ The database E2E test uses the test-only authentication route to submit all thre
 
 ## Operations and privacy
 
-Environment startup validation covers database URL, GitHub client ID outside tests, port, session lifetime, proxy trust, and runtime environment. Set `TRUST_PROXY=true` only behind a trusted reverse proxy so IP rate limits cannot be spoofed. Global rate limiting is 120 requests/minute/IP, with tighter device-start and run-write limits. Production logs redact authorization headers, poll/session tokens, device codes, and OAuth access tokens. Request payloads and credentials must not be added to application log statements.
+Environment startup validation covers database URL, GitHub client ID outside tests, website URL, optional all-or-none Cloudflare email settings, port, session lifetime, proxy trust, and runtime environment. Production website URLs must use HTTPS, except for loopback-only local containers. Set `TRUST_PROXY=true` only behind a trusted reverse proxy so IP rate limits cannot be spoofed. Global rate limiting is 120 requests/minute/IP, with tighter auth-start and run-write limits. Production logs redact authorization headers, email addresses, poll/session/verification tokens, device codes, and OAuth access tokens. Request payloads and credentials must not be added to application log statements.

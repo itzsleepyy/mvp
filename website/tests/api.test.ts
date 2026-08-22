@@ -26,7 +26,7 @@ describe("leaderboard API", () => {
       json: vi.fn().mockResolvedValue(responseBody),
     });
     vi.stubGlobal("fetch", fetchMock);
-    vi.stubEnv("NEXT_PUBLIC_MVP_API_URL", "https://api.example.test/");
+    vi.stubEnv("MVP_API_URL", "https://api.example.test/");
 
     await expect(fetchLeaderboard("weekly", "overall")).resolves.toEqual(responseBody);
     expect(fetchMock).toHaveBeenCalledWith(
