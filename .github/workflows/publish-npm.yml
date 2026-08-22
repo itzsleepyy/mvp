@@ -19,6 +19,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
+      publish: ${{ steps.version.outputs.publish }}
     steps:
       - uses: actions/checkout@v4
       - name: Install Linux build dependencies
@@ -36,12 +37,19 @@ jobs:
           npm_version=$(node -p "require('./npm/package.json').version")
           test "$cargo_version" = "$npm_version" || { echo "Cargo version $cargo_version does not match npm version $npm_version"; exit 1; }
           echo "version=$cargo_version" >> "$GITHUB_OUTPUT"
+          if npm view "@mvp-play/cli@$cargo_version" version >/dev/null 2>&1; then
+            echo "Version $cargo_version is already published; skipping native builds and publication."
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          fi
       - run: cargo fmt --check
       - run: cargo clippy --locked -- -D warnings
       - run: cargo test --locked
 
   build:
     needs: validate
+    if: needs.validate.outputs.publish == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -88,6 +96,7 @@ jobs:
 
   publish:
     needs: [validate, build]
+    if: needs.validate.outputs.publish == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -105,4 +114,6 @@ jobs:
       - run: chmod +x npm/bin/mvp.js npm/bin/mvp-darwin-* npm/bin/mvp-linux-*
       - run: npm install --global npm@latest
       - run: npm publish --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         working-directory: npm
