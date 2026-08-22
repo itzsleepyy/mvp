@@ -92,6 +92,8 @@ cargo clippy -- -D warnings
 
 The root is a Cargo workspace and `package/src/` is the authoritative Rust implementation. See [Development](docs/development.md) and [Architecture](docs/architecture.md) for technical details.
 
+Production deployment instructions for `mostvaluedprogrammer.com` are in [Coolify Deployment](docs/coolify.md).
+
 ## License
 
 MIT - see [LICENSE](LICENSE).

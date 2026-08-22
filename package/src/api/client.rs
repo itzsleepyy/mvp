@@ -5,7 +5,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-pub const DEFAULT_API_URL: &str = "https://api.mvp.dev";
+pub const DEFAULT_API_URL: &str = "https://api.mostvaluedprogrammer.com";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 
@@ -323,5 +323,10 @@ mod tests {
         ));
         assert!(ApiClient::new("http://127.0.0.1:3000").is_ok());
         assert!(ApiClient::new("http://localhost:3000").is_ok());
+    }
+
+    #[test]
+    fn production_api_origin_matches_the_public_deployment() {
+        assert_eq!(DEFAULT_API_URL, "https://api.mostvaluedprogrammer.com");
     }
 }

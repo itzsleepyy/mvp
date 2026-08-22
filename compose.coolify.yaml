@@ -1,0 +1,69 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: mvp
+      POSTGRES_USER: mvp
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set a URL-safe PostgreSQL password}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mvp -d mvp"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - mvp-postgres-production:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: ./backend
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: 3000
+      DATABASE_URL: postgres://mvp:${POSTGRES_PASSWORD}@postgres:5432/mvp # ggignore
+      GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID:?Set the official GitHub OAuth App client ID}
+      EMAIL_AUTH_ENABLED: ${EMAIL_AUTH_ENABLED:-false}
+      CLOUDFLARE_ACCOUNT_ID: ${CLOUDFLARE_ACCOUNT_ID:-}
+      CLOUDFLARE_EMAIL_API_TOKEN: ${CLOUDFLARE_EMAIL_API_TOKEN:-}
+      EMAIL_FROM: ${EMAIL_FROM:-}
+      WEBSITE_URL: https://mostvaluedprogrammer.com
+      SESSION_SECRET: ${SESSION_SECRET:?Set a random secret of at least 32 characters}
+      SESSION_TTL_DAYS: 30
+      LOG_LEVEL: info
+      TRUST_PROXY: "true"
+    expose:
+      - "3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:3000/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  website:
+    build:
+      context: ./website
+      args:
+        NEXT_PUBLIC_SITE_URL: https://mostvaluedprogrammer.com
+    environment:
+      MVP_API_URL: http://backend:3000
+      NEXT_PUBLIC_SITE_URL: https://mostvaluedprogrammer.com
+      EMAIL_AUTH_ENABLED: ${EMAIL_AUTH_ENABLED:-false}
+    expose:
+      - "3001"
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:3001/"]
+      interval: 10s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+volumes:
+  mvp-postgres-production:
