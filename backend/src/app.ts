@@ -312,6 +312,26 @@ export async function buildApp(options: AppOptions) {
     () => ({ status: "ok" as const }),
   );
 
+  app.get(
+    "/v1/client-version",
+    {
+      schema: {
+        response: {
+          200: Type.Object({
+            minimum_version: Type.String(),
+            latest_version: Type.String(),
+            update_command: Type.String(),
+          }),
+        },
+      },
+    },
+    () => ({
+      minimum_version: config.minimumClientVersion,
+      latest_version: config.latestClientVersion,
+      update_command: "npm install --global @mvp-play/cli@latest",
+    }),
+  );
+
   app.post(
     "/v1/auth/github/device",
     {

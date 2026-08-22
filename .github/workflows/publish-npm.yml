@@ -1,0 +1,103 @@
+name: Publish npm CLI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "package/**"
+      - "npm/**"
+      - ".github/workflows/publish-npm.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - id: version
+        shell: bash
+        run: |
+          cargo_version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "mvp") | .version')
+          npm_version=$(node -p "require('./npm/package.json').version")
+          test "$cargo_version" = "$npm_version" || { echo "Cargo version $cargo_version does not match npm version $npm_version"; exit 1; }
+          echo "version=$cargo_version" >> "$GITHUB_OUTPUT"
+      - run: cargo fmt --check
+      - run: cargo clippy --locked -- -D warnings
+      - run: cargo test --locked
+
+  build:
+    needs: validate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-13
+            target: x86_64-apple-darwin
+            artifact: mvp-darwin-x64
+          - runner: macos-14
+            target: aarch64-apple-darwin
+            artifact: mvp-darwin-arm64
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact: mvp-linux-x64
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            artifact: mvp-linux-arm64
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: mvp-win32-x64.exe
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - run: cargo build --locked --release --package mvp --target ${{ matrix.target }}
+      - name: Stage binary
+        shell: bash
+        run: |
+          mkdir staging
+          if [[ "${{ matrix.target }}" == *windows* ]]; then
+            cp "target/${{ matrix.target }}/release/mvp.exe" "staging/${{ matrix.artifact }}"
+          else
+            cp "target/${{ matrix.target }}/release/mvp" "staging/${{ matrix.artifact }}"
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: staging/${{ matrix.artifact }}
+          if-no-files-found: error
+
+  publish:
+    needs: [validate, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - uses: actions/download-artifact@v4
+        with:
+          path: npm/bin
+          merge-multiple: true
+      - run: chmod +x npm/bin/mvp.js npm/bin/mvp-darwin-* npm/bin/mvp-linux-*
+      - run: npm install --global npm@latest
+      - run: npm publish --provenance
+        working-directory: npm

@@ -15,6 +15,25 @@ pub struct ApiClient {
     http: reqwest::Client,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct ClientVersion {
+    pub minimum_version: String,
+    pub latest_version: String,
+    pub update_command: String,
+}
+
+impl ClientVersion {
+    pub fn is_obsolete(&self, installed: &str) -> bool {
+        let Ok(installed) = semver::Version::parse(installed) else {
+            return false;
+        };
+        let Ok(minimum) = semver::Version::parse(&self.minimum_version) else {
+            return false;
+        };
+        installed < minimum
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum ApiError {
     #[error("authentication is required or has expired")]
@@ -85,6 +104,10 @@ impl ApiClient {
 
     pub fn origin(&self) -> &str {
         &self.base_url
+    }
+
+    pub async fn client_version(&self) -> Result<ClientVersion, ApiError> {
+        self.get("/v1/client-version", None).await
     }
 
     #[cfg(test)]
@@ -328,5 +351,18 @@ mod tests {
     #[test]
     fn production_api_origin_matches_the_public_deployment() {
         assert_eq!(DEFAULT_API_URL, "https://api.mostvaluedprogrammer.com");
+    }
+
+    #[test]
+    fn client_version_blocks_only_versions_below_the_minimum() {
+        let policy = ClientVersion {
+            minimum_version: "1.2.0".into(),
+            latest_version: "1.4.0".into(),
+            update_command: "update".into(),
+        };
+        assert!(policy.is_obsolete("1.1.9"));
+        assert!(!policy.is_obsolete("1.2.0"));
+        assert!(!policy.is_obsolete("2.0.0"));
+        assert!(!policy.is_obsolete("unknown"));
     }
 }

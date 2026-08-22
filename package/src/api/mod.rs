@@ -11,7 +11,7 @@ pub use auth::{
     AuthFlow, BrowserFlow, CredentialStore, EmailFlow, KeyringCredentialStore, PollingFlow,
     Session, SessionManager,
 };
-pub use client::{ApiClient, ApiError};
+pub use client::{ApiClient, ApiError, ClientVersion};
 pub use leaderboard::{Leaderboard, LeaderboardRequest};
 pub use queue::{PendingRunQueue, QueueProcessResult};
 pub use runs::{GameId, RunPayload};

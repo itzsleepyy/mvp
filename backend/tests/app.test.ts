@@ -21,6 +21,24 @@ describe("HTTP boundaries", () => {
 
   afterEach(async () => app?.close());
 
+  it("publishes the supported CLI version and update command", async () => {
+    app = await buildApp({
+      config: {
+        ...config,
+        minimumClientVersion: "1.2.0",
+        latestClientVersion: "1.4.0",
+      },
+      db,
+    });
+    const response = await app.inject({ url: "/v1/client-version" });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({
+      minimum_version: "1.2.0",
+      latest_version: "1.4.0",
+      update_command: "npm install --global @mvp-play/cli@latest",
+    });
+  });
+
   it("returns the stable 429 envelope", async () => {
     app = await buildApp({ config, db });
     for (let index = 0; index < 120; index += 1) {

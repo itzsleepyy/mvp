@@ -32,6 +32,8 @@ services:
       SESSION_TTL_DAYS: 30
       LOG_LEVEL: info
       TRUST_PROXY: "true"
+      MINIMUM_CLIENT_VERSION: ${MINIMUM_CLIENT_VERSION:-0.1.0}
+      LATEST_CLIENT_VERSION: ${LATEST_CLIENT_VERSION:-0.1.0}
     expose:
       - "3000"
     depends_on:
