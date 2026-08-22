@@ -15,6 +15,8 @@ export interface Config {
   sessionTtlDays: number;
   logLevel: string;
   trustProxy: boolean;
+  minimumClientVersion: string;
+  latestClientVersion: string;
 }
 
 function integer(
@@ -60,6 +62,12 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env): Config {
   if (emailAuthEnabledValue !== "true" && emailAuthEnabledValue !== "false")
     throw new Error("EMAIL_AUTH_ENABLED must be true or false");
   const emailAuthEnabled = emailAuthEnabledValue === "true";
+  const minimumClientVersion = optional(env.MINIMUM_CLIENT_VERSION) ?? "0.1.0";
+  const latestClientVersion =
+    optional(env.LATEST_CLIENT_VERSION) ?? minimumClientVersion;
+  const semver = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
+  if (!semver.test(minimumClientVersion) || !semver.test(latestClientVersion))
+    throw new Error("Client versions must be semantic versions");
   const cloudflareAccountId = optional(env.CLOUDFLARE_ACCOUNT_ID);
   const cloudflareEmailApiToken = optional(env.CLOUDFLARE_EMAIL_API_TOKEN);
   const emailFrom = optional(env.EMAIL_FROM);
@@ -121,5 +129,7 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env): Config {
     ),
     logLevel: env.LOG_LEVEL ?? "info",
     trustProxy: trustProxy === "true",
+    minimumClientVersion,
+    latestClientVersion,
   };
 }

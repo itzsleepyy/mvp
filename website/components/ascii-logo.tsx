@@ -68,7 +68,7 @@ export default function AsciiLogo() {
     >
       {DOH_LOGO.map((line, y) => (
         <div key={y} className="ascii-logo-row">
-          {line.split("").map((ch, x) => {
+          {line.padEnd(COLS, " ").split("").map((ch, x) => {
             const hue = 105 + (x / (COLS - 1)) * 85;
             return (
               <span

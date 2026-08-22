@@ -11,6 +11,8 @@ describe("readConfig", () => {
       emailAuthEnabled: false,
       sessionTtlDays: 30,
       trustProxy: false,
+      minimumClientVersion: "0.1.0",
+      latestClientVersion: "0.1.0",
     });
   });
 
@@ -28,6 +30,27 @@ describe("readConfig", () => {
         PORT: "zero",
       }),
     ).toThrow("PORT");
+  });
+
+  it("loads and validates client versions", () => {
+    expect(
+      readConfig({
+        NODE_ENV: "test",
+        DATABASE_URL: "postgres://test",
+        MINIMUM_CLIENT_VERSION: "1.2.0",
+        LATEST_CLIENT_VERSION: "1.4.3",
+      }),
+    ).toMatchObject({
+      minimumClientVersion: "1.2.0",
+      latestClientVersion: "1.4.3",
+    });
+    expect(() =>
+      readConfig({
+        NODE_ENV: "test",
+        DATABASE_URL: "postgres://test",
+        MINIMUM_CLIENT_VERSION: "latest",
+      }),
+    ).toThrow("semantic versions");
   });
 
   it("allows email authentication to be omitted", () => {

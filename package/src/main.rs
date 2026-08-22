@@ -373,6 +373,16 @@ fn run_provider(kind: AgentKind, command: ProviderCommand) -> Result<(), Box<dyn
 }
 
 fn run_tui(agent: Option<AgentDisplay>, no_auto_resume: bool) -> Result<(), Box<dyn Error>> {
+    if let Some(version) = obsolete_client_version() {
+        println!(
+            "MVP {} is no longer supported. Version {} or newer is required (latest: {}).",
+            env!("CARGO_PKG_VERSION"),
+            version.minimum_version,
+            version.latest_version
+        );
+        println!("Update with: {}", version.update_command);
+        return Ok(());
+    }
     let online = start_online_worker();
     tui::install_panic_hook();
     let mut terminal = tui::init()?;
@@ -380,6 +390,20 @@ fn run_tui(agent: Option<AgentDisplay>, no_auto_resume: bool) -> Result<(), Box<
     let result = run(&mut terminal, agent, no_auto_resume, online);
     tui::restore()?;
     result
+}
+
+fn obsolete_client_version() -> Option<api::ClientVersion> {
+    let client = ApiClient::from_env().ok()?;
+    let version = run_online(async move {
+        client
+            .client_version()
+            .await
+            .map_err(|error| -> Box<dyn Error> { Box::new(error) })
+    })
+    .ok()?;
+    version
+        .is_obsolete(env!("CARGO_PKG_VERSION"))
+        .then_some(version)
 }
 
 fn run(

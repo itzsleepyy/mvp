@@ -33,6 +33,8 @@ POSTGRES_PASSWORD=<first-generated-secret>
 SESSION_SECRET=<second-generated-secret>
 GITHUB_CLIENT_ID=<official-github-oauth-client-id>
 EMAIL_AUTH_ENABLED=false
+MINIMUM_CLIENT_VERSION=0.1.0
+LATEST_CLIENT_VERSION=0.1.0
 ```
 
 Cloudflare email variables may remain unset while email authentication is disabled.
@@ -50,6 +52,7 @@ Confirm that both services are healthy:
 
 ```bash
 curl --fail https://api.mostvaluedprogrammer.com/health
+curl --fail https://api.mostvaluedprogrammer.com/v1/client-version
 curl --fail --head https://mostvaluedprogrammer.com/sign-in
 ```
 
@@ -85,3 +88,4 @@ The backend refuses to start with email enabled and incomplete provider credenti
 - Keep automatic deployments limited to reviewed branches.
 - Rotate `SESSION_SECRET` only with a planned global sign-out; changing it invalidates deterministic replay-safe flow sessions.
 - Never expose port 5432 or commit Coolify environment values.
+- Publish a CLI release before raising `MINIMUM_CLIENT_VERSION`; see [CLI Releases](releases.md).

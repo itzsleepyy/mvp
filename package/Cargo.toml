@@ -20,6 +20,7 @@ ratatui = "0.30.2"
 reqwest = { version = "0.12.24", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.151", features = ["preserve_order"] }
+semver = "1.0.26"
 thiserror = "2.0.17"
 tokio = { version = "1.48.0", features = ["macros", "rt-multi-thread", "sync", "time"] }
 uuid = { version = "1.18.1", features = ["serde", "v4"] }
