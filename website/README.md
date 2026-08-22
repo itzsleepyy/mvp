@@ -25,6 +25,7 @@ The website is available at `http://localhost:3001` and calls the backend over t
 
 - `MVP_API_URL` - server-only MVP backend origin used for leaderboard and authentication requests. Defaults to `http://localhost:3000` for local development. Do not expose it through a `NEXT_PUBLIC_` variable.
 - `NEXT_PUBLIC_SITE_URL` - canonical public website origin. Defaults to `http://localhost:3001`.
+- `EMAIL_AUTH_ENABLED` - set to `true` on both the website and backend to display and accept email magic-link authentication. Defaults to `false`.
 
 Neither value is a credential. `MVP_API_URL` may use the backend's private network origin, while the backend's `WEBSITE_URL` and this site's `NEXT_PUBLIC_SITE_URL` must identify the same public HTTPS origin in a deployment. GitHub device authorization and email magic-link exchange are proxied through same-origin route handlers. Backend bearer tokens are stored only in the `mvp_session` cookie, which is `HttpOnly`, `SameSite=Lax`, scoped to `/`, expires with the backend session, and is `Secure` in production. Browser JavaScript receives profile/status data but never the bearer token. Sign-out attempts backend revocation and always clears the local cookie.
 

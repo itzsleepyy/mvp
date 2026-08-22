@@ -6,7 +6,7 @@ A competitive terminal arcade for the time between coding-agent prompts.
 
 MVP turns the short waits while Claude Code, Codex, Gemini CLI, or OpenCode works into quick terminal games. Agent lifecycle integrations pause the game when an agent needs attention and let you return to work without losing a run.
 
-Local play works without an account. GitHub or email sign-in adds global score submission, ranks, and the Daily MVP competition; game traffic never includes source code, prompts, repositories, terminal contents, or coding-agent output.
+Local play works without an account. GitHub sign-in adds global score submission, ranks, and the Daily MVP competition; deployments can optionally enable email magic links. Game traffic never includes source code, prompts, repositories, terminal contents, or coding-agent output.
 
 ## Games
 
@@ -47,7 +47,7 @@ mvp leaderboard stack-overflow
 mvp logout
 ```
 
-`mvp login` opens the MVP website, where you can continue with GitHub or an email magic link, then securely hands a separate session back to the terminal. The explicit `--github` and `--email` options run those provider flows directly as fallbacks. MVP stores only the resulting session in the operating system credential store. Press `I` on the main menu to start the same browser sign-in flow without leaving the application. Failed authenticated run submissions are queued locally and retried without interrupting play. Press `L` to open Daily MVP; local games remain available when the service is offline.
+`mvp login` opens the MVP website, where you can continue with GitHub or, when enabled by the deployment, an email magic link. It then securely hands a separate session back to the terminal. The explicit `--github` and `--email` options run those provider flows directly as fallbacks; `--email` is unavailable when email authentication is disabled. MVP stores only the resulting session in the operating system credential store. Press `I` on the main menu to start the same browser sign-in flow without leaving the application. Failed authenticated run submissions are queued locally and retried without interrupting play. Press `L` to open Daily MVP; local games remain available when the service is offline.
 
 ## Installation
 

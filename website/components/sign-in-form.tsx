@@ -273,8 +273,14 @@ export function SignInForm({
         </section>
       )}
 
-      <div className={emailAuthEnabled ? "grid gap-8 md:grid-cols-2 md:gap-0" : "max-w-xl"}>
-      <section className={`flex min-h-72 flex-col border border-border bg-card p-6 sm:p-8 ${emailAuthEnabled ? "md:border-r-0" : ""}`}>
+      <div
+        className={
+          emailAuthEnabled ? "grid gap-8 md:grid-cols-2 md:gap-0" : "max-w-xl"
+        }
+      >
+      <section
+        className={`flex min-h-72 flex-col border border-border bg-card p-6 sm:p-8 ${emailAuthEnabled ? "md:border-r-0" : ""}`}
+      >
         <div className="mb-8 flex items-center gap-3">
           <CircleUserRound aria-hidden="true" className="size-5 text-primary" />
           <h2 className="text-lg font-medium">GitHub</h2>
@@ -323,7 +329,8 @@ export function SignInForm({
         )}
       </section>
 
-      {emailAuthEnabled && <section className="flex min-h-72 flex-col border border-border bg-card p-6 sm:p-8">
+      {emailAuthEnabled && (
+        <section className="flex min-h-72 flex-col border border-border bg-card p-6 sm:p-8">
         <div className="mb-8 flex items-center gap-3">
           <Mail aria-hidden="true" className="size-5 text-primary" />
           <h2 className="text-lg font-medium">Email</h2>
@@ -366,7 +373,8 @@ export function SignInForm({
             {emailError}
           </p>
         )}
-      </section>}
+        </section>
+      )}
       </div>
     </div>
   );

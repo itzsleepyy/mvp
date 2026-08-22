@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const auth = vi.hoisted(() => ({
   backendFetch: vi.fn(),
@@ -19,7 +19,11 @@ import { POST as logout } from "@/app/api/auth/logout/route";
 import { GET as verifyEmail } from "@/app/auth/email/verify/route";
 
 describe("auth route handlers", () => {
-  beforeEach(() => vi.clearAllMocks());
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.stubEnv("EMAIL_AUTH_ENABLED", "true");
+  });
+  afterEach(() => vi.unstubAllEnvs());
 
   it("stores a completed GitHub session without returning its bearer token", async () => {
     const session = {
@@ -129,6 +133,20 @@ describe("auth route handlers", () => {
         browser_token: "browser-token-with-enough-length",
       }),
     });
+  });
+
+  it("rejects email starts locally when email authentication is disabled", async () => {
+    vi.stubEnv("EMAIL_AUTH_ENABLED", "false");
+
+    const response = await startEmail(
+      new Request("http://localhost/api/auth/email/start", {
+        method: "POST",
+        body: JSON.stringify({ email: "person@example.com" }),
+      }),
+    );
+
+    expect(response.status).toBe(503);
+    expect(auth.backendFetch).not.toHaveBeenCalled();
   });
 
   it("completes an email handoff before setting the cookie and redirects to CLI success", async () => {
