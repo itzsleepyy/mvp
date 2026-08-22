@@ -1,8 +1,15 @@
 import type { Metadata } from "next";
-import { Pixelify_Sans } from "next/font/google";
+import { Pixelify_Sans, Geist } from "next/font/google";
 import { Footer } from "@/components/footer";
 import { Navbar } from "@/components/navbar";
 import "./globals.css";
+import { cn } from "@/lib/utils";
+
+const geist = Geist({
+  subsets: ["latin"],
+  variable: "--font-sans",
+  display: "swap",
+});
 
 const pixelify = Pixelify_Sans({
   weight: "400",
@@ -40,10 +47,18 @@ export const metadata: Metadata = {
   },
 };
 
-export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
+export default function RootLayout({
+  children,
+}: Readonly<{ children: React.ReactNode }>) {
   return (
-    <html lang="en" className={pixelify.variable}>
+    <html
+      lang="en"
+      className={cn(geist.variable, pixelify.variable, "font-sans")}
+    >
       <body>
+        <a className="skip-link" href="#main-content">
+          Skip to content
+        </a>
         <Navbar />
         {children}
         <Footer />

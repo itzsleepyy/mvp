@@ -4,24 +4,39 @@ const REPOSITORY = "https://github.com/itzsleepyy/waitstate";
 
 export function Navbar() {
   return (
-    <>
-      <a className="skip-link" href="#main-content">
-        Skip to content
-      </a>
-      <header className="site-header">
-        <nav className="nav shell" aria-label="Primary navigation">
-        <Link className="wordmark" href="/" aria-label="MVP home">
-          MVP<span className="cursor" aria-hidden="true" />
+    <header className="sticky top-0 z-50 border-b border-border bg-background/80 backdrop-blur-md">
+      <div className="mx-auto flex h-14 w-full max-w-5xl items-center justify-between px-4 sm:px-6">
+        <Link
+          href="/"
+          className="font-pixelify text-xl leading-none tracking-wide text-foreground"
+          aria-label="MVP home"
+        >
+          MVP
         </Link>
-        <div className="nav-links">
-          <Link href="/leaderboard">Leaderboard</Link>
-          <a href={REPOSITORY}>GitHub</a>
-          <Link className="nav-download" href="/#install">
-            Download
+        <nav
+          className="flex items-center gap-6 text-sm text-muted-foreground"
+          aria-label="Primary navigation"
+        >
+          <Link
+            href="/about"
+            className="transition-colors hover:text-foreground"
+          >
+            About
           </Link>
-        </div>
+          <Link
+            href="/leaderboard"
+            className="transition-colors hover:text-foreground"
+          >
+            Leaderboard
+          </Link>
+          <a
+            href={REPOSITORY}
+            className="transition-colors hover:text-foreground"
+          >
+            GitHub
+          </a>
         </nav>
-      </header>
-    </>
+      </div>
+    </header>
   );
 }

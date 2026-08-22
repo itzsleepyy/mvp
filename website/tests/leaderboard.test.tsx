@@ -33,15 +33,20 @@ const board: Leaderboard = {
 };
 
 describe("leaderboard", () => {
-  it("renders API rankings, avatars, and MVP points", () => {
+  it("renders API rankings in a table with avatars and MVP points", () => {
     render(<LeaderboardView board={board} period="daily" game="overall" />);
 
     expect(screen.getByRole("heading", { name: "Daily MVP" })).toBeInTheDocument();
+    expect(screen.getByRole("table")).toBeInTheDocument();
+    expect(screen.getByRole("columnheader", { name: "Rank" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("columnheader", { name: "Programmer" }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("columnheader", { name: "MVP" })).toBeInTheDocument();
     expect(screen.getByText("Alice")).toBeInTheDocument();
     expect(screen.getByText("@alice")).toBeInTheDocument();
-    expect(screen.getByAltText("Alice avatar")).toBeInTheDocument();
+    expect(screen.getAllByText("AL")).toHaveLength(2);
     expect(screen.getByText("9,842")).toBeInTheDocument();
-    expect(screen.getByRole("list")).toBeInTheDocument();
   });
 
   it("renders loading, empty, and API failure states", () => {
@@ -49,15 +54,19 @@ describe("leaderboard", () => {
     expect(screen.getByText(/loading leaderboard/i)).toBeInTheDocument();
 
     rerender(
-      <LeaderboardView board={{ ...board, entries: [] }} period="daily" game="overall" />,
+      <LeaderboardView
+        board={{ ...board, entries: [] }}
+        period="daily"
+        game="overall"
+      />,
     );
-    expect(screen.getByRole("heading", { name: "No scores yet." })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "No scores yet" })).toBeInTheDocument();
 
     rerender(
       <LeaderboardView board={null} period="daily" game="overall" unavailable />,
     );
     expect(
-      screen.getByRole("heading", { name: "Leaderboard unavailable." }),
+      screen.getByRole("heading", { name: "Leaderboard unavailable" }),
     ).toBeInTheDocument();
     expect(screen.getByText(/played locally/i)).toBeInTheDocument();
   });

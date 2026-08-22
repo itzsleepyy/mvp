@@ -23,11 +23,13 @@ export default function OpenGraphImage() {
       <div style={{ color: "#a6ff6f", display: "flex", fontSize: 30 }}>
         MVP / MOST VALUED PROGRAMMER
       </div>
-      <div style={{ display: "flex", fontSize: 82, lineHeight: 1.05, maxWidth: 900 }}>
-        THE ARCADE FOR PROGRAMMERS.
+      <div
+        style={{ display: "flex", fontSize: 180, lineHeight: 1, maxWidth: 1000 }}
+      >
+        MVP
       </div>
       <div style={{ color: "#8c8c87", display: "flex", fontSize: 24 }}>
-        PLAY WHILE YOUR CODING AGENTS WORK.
+        npm install mvp
       </div>
     </div>,
     size,
