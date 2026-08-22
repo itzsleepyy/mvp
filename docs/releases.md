@@ -6,7 +6,7 @@ The `@mvp-play/cli` npm package contains prebuilt MVP binaries for Intel and App
 
 1. Create the `mvp-play` organization on npm and ensure the package name `@mvp-play/cli` is available.
 2. In the npm package settings, add a GitHub Actions trusted publisher for repository `itzsleepyy/mvp` and workflow file `publish-npm.yml`.
-3. Protect `main` and require pull requests to pass the repository checks before merging.
+3. Protect `main` and require the `Rust`, `Backend`, `Website`, and `Deployment configuration` status checks before merging.
 
 Trusted publishing uses GitHub's short-lived OIDC identity. Do not create or store a long-lived npm token in the repository.
 
