@@ -360,12 +360,12 @@ mod tests {
         let run = run();
         assert!(
             queue
-                .enqueue(run.clone(), uuid::Uuid::nil(), "https://api.mvp.dev")
+                .enqueue(run.clone(), uuid::Uuid::nil(), "https://api.example.com")
                 .unwrap()
         );
         assert!(
             !queue
-                .enqueue(run, uuid::Uuid::nil(), "https://api.mvp.dev")
+                .enqueue(run, uuid::Uuid::nil(), "https://api.example.com")
                 .unwrap()
         );
         assert_eq!(PendingRunQueue::load(&file).unwrap().len(), 1);
