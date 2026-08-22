@@ -13,7 +13,7 @@ Cargo.toml              workspace manifest
 package/Cargo.toml      mvp package manifest
 package/src/            authoritative Rust implementation
 backend/                versioned API and PostgreSQL migrations
-website/                reserved for the future website application
+website/                independently deployable Next.js public site
 ```
 
 There is one workspace package and one user-facing binary, both named `mvp`.
