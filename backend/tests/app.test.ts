@@ -58,6 +58,25 @@ describe("HTTP boundaries", () => {
     });
   });
 
+  it.each(["verify", "poll"])(
+    "rejects email %s while email authentication is disabled",
+    async (operation) => {
+      app = await buildApp({ config, db });
+      const response = await app.inject({
+        method: "POST",
+        url: `/v1/auth/email/${operation}`,
+        payload:
+          operation === "verify"
+            ? { token: "t".repeat(32) }
+            : { poll_token: "p".repeat(32) },
+      });
+      expect(response.statusCode).toBe(503);
+      expect(response.json()).toMatchObject({
+        error: { code: "email_auth_unavailable" },
+      });
+    },
+  );
+
   it("creates separate private poll and browser handoff tokens", async () => {
     const query = vi.fn().mockResolvedValue({ rows: [] });
     app = await buildApp({
@@ -108,7 +127,11 @@ describe("HTTP boundaries", () => {
       })
       .mockResolvedValueOnce({ rows: [] });
     app = await buildApp({
-      config: { ...config, emailFrom: "login@waitstate.example" },
+      config: {
+        ...config,
+        emailAuthEnabled: true,
+        emailFrom: "login@waitstate.example",
+      },
       db: { query } as unknown as Database,
       email: { send },
     });
@@ -129,6 +152,7 @@ describe("HTTP boundaries", () => {
     app = await buildApp({
       config: {
         ...config,
+        emailAuthEnabled: true,
         cloudflareAccountId: "account",
         cloudflareEmailApiToken: "token",
         emailFrom: "login@waitstate.example",

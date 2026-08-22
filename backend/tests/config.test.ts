@@ -8,6 +8,7 @@ describe("readConfig", () => {
     ).toMatchObject({
       nodeEnv: "test",
       port: 3000,
+      emailAuthEnabled: false,
       sessionTtlDays: 30,
       trustProxy: false,
     });
@@ -81,6 +82,26 @@ describe("readConfig", () => {
     ).toThrow("must be configured together");
   });
 
+  it("rejects an invalid email authentication flag", () => {
+    expect(() =>
+      readConfig({
+        NODE_ENV: "test",
+        DATABASE_URL: "postgres://test",
+        EMAIL_AUTH_ENABLED: "yes",
+      }),
+    ).toThrow("EMAIL_AUTH_ENABLED must be true or false");
+  });
+
+  it("requires Cloudflare settings when email authentication is enabled", () => {
+    expect(() =>
+      readConfig({
+        NODE_ENV: "test",
+        DATABASE_URL: "postgres://test",
+        EMAIL_AUTH_ENABLED: "true",
+      }),
+    ).toThrow("Cloudflare email settings are required");
+  });
+
   it("requires WEBSITE_URL in production", () => {
     expect(() =>
       readConfig({
@@ -121,12 +142,14 @@ describe("readConfig", () => {
       readConfig({
         NODE_ENV: "test",
         DATABASE_URL: "postgres://test",
+        EMAIL_AUTH_ENABLED: "true",
         CLOUDFLARE_ACCOUNT_ID: "account",
         CLOUDFLARE_EMAIL_API_TOKEN: "secret-token",
         EMAIL_FROM: "login@waitstate.example",
         WEBSITE_URL: "https://waitstate.example/",
       }),
     ).toMatchObject({
+      emailAuthEnabled: true,
       cloudflareAccountId: "account",
       cloudflareEmailApiToken: "secret-token",
       emailFrom: "login@waitstate.example",

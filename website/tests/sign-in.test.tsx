@@ -41,7 +41,7 @@ describe("sign in", () => {
       "fetch",
       vi.fn().mockResolvedValue(Response.json({ status: "sent" }, { status: 201 })),
     );
-    render(<SignInForm />);
+    render(<SignInForm emailAuthEnabled />);
 
     fireEvent.change(screen.getByLabelText("Email address"), {
       target: { value: "person@example.com" },
@@ -52,6 +52,13 @@ describe("sign in", () => {
     expect(screen.getByRole("status")).toHaveTextContent(
       /if an account can sign in/i,
     );
+  });
+
+  it("hides email sign-in by default", () => {
+    render(<SignInForm />);
+
+    expect(screen.queryByRole("heading", { name: "Email" })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Email address")).not.toBeInTheDocument();
   });
 
   it("requires confirmation before binding an existing website session", async () => {

@@ -29,6 +29,7 @@ describe.skipIf(!databaseUrl)("database API", () => {
       config: readConfig({
         NODE_ENV: "test",
         DATABASE_URL: databaseUrl,
+        EMAIL_AUTH_ENABLED: "true",
         CLOUDFLARE_ACCOUNT_ID: "test-account",
         CLOUDFLARE_EMAIL_API_TOKEN: "test-api-token",
         EMAIL_FROM: "login@waitstate.example",

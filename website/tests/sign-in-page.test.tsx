@@ -1,18 +1,21 @@
 import { render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@/components/sign-in-form", () => ({
   SignInForm: ({
     browserToken,
     cliComplete,
+    emailAuthEnabled,
   }: {
     browserToken?: string;
     cliComplete?: boolean;
+    emailAuthEnabled?: boolean;
   }) => (
     <div
       data-testid="sign-in-form"
       data-browser-token={browserToken}
       data-cli-complete={String(cliComplete)}
+      data-email-enabled={String(emailAuthEnabled)}
     />
   ),
 }));
@@ -20,6 +23,8 @@ vi.mock("@/components/sign-in-form", () => ({
 import SignInPage from "@/app/sign-in/page";
 
 describe("sign-in page", () => {
+  afterEach(() => vi.unstubAllEnvs());
+
   it("passes a valid handoff from asynchronous search params", async () => {
     render(
       await SignInPage({
@@ -56,6 +61,20 @@ describe("sign-in page", () => {
 
     expect(screen.getByTestId("sign-in-form")).toHaveAttribute(
       "data-cli-complete",
+      "true",
+    );
+  });
+
+  it("enables email only when explicitly configured", async () => {
+    vi.stubEnv("EMAIL_AUTH_ENABLED", "true");
+    render(
+      await SignInPage({
+        searchParams: Promise.resolve({}),
+      }),
+    );
+
+    expect(screen.getByTestId("sign-in-form")).toHaveAttribute(
+      "data-email-enabled",
       "true",
     );
   });
