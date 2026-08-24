@@ -29,7 +29,7 @@ export default function OpenGraphImage() {
         MVP
       </div>
       <div style={{ color: "#8c8c87", display: "flex", fontSize: 24 }}>
-        npm install mvp
+        npx @mvp-play/cli
       </div>
     </div>,
     size,

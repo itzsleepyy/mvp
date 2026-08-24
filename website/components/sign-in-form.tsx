@@ -3,11 +3,13 @@
 import { useEffect, useState } from "react";
 import {
   CheckCircle2,
-  CircleUserRound,
+  Copy,
   ExternalLink,
   LoaderCircle,
   Mail,
+  SquareTerminal,
 } from "lucide-react";
+import { GitHubLogo } from "@/assets/icons/githubLogo";
 import { useRouter } from "next/navigation";
 import { Button, buttonVariants } from "@/components/ui/button";
 
@@ -54,6 +56,18 @@ export function SignInForm({
     "idle",
   );
   const [emailError, setEmailError] = useState("");
+  const [codeStatus, setCodeStatus] = useState<"idle" | "copied">("idle");
+
+  async function copyCode() {
+    if (!githubFlow) return;
+    try {
+      await navigator.clipboard.writeText(githubFlow.user_code);
+      setCodeStatus("copied");
+      window.setTimeout(() => setCodeStatus("idle"), 1_500);
+    } catch {
+      setCodeStatus("idle");
+    }
+  }
 
   useEffect(() => {
     if (!browserToken) return;
@@ -216,10 +230,15 @@ export function SignInForm({
 
   if (completed) {
     return (
-      <section className="max-w-xl border border-border bg-card p-6 sm:p-8">
-        <CheckCircle2 aria-hidden="true" className="size-7 text-primary" />
-        <h2 className="mt-5 text-xl font-medium">Terminal sign-in complete</h2>
-        <p className="mt-3 text-sm leading-6 text-muted-foreground" role="status">
+      <section className="rounded-xl border border-primary/30 bg-card p-8 text-center shadow-[0_0_60px_-20px] shadow-primary/40 sm:p-10">
+        <div className="mx-auto flex size-14 items-center justify-center rounded-full border border-primary/40 bg-primary/10">
+          <CheckCircle2 aria-hidden="true" className="size-7 text-primary" />
+        </div>
+        <h2 className="mt-6 font-pixelify text-2xl">Terminal sign-in complete</h2>
+        <p
+          className="mx-auto mt-3 max-w-xs text-sm leading-6 text-muted-foreground"
+          role="status"
+        >
           Return to your terminal to continue. You can close this browser tab.
         </p>
       </section>
@@ -229,10 +248,13 @@ export function SignInForm({
   return (
     <div>
       {browserToken && (
-        <section className="mb-8 border border-border bg-card p-6 sm:p-8">
-          <p className="text-xs tracking-widest text-primary uppercase">
-            Terminal sign-in
-          </p>
+        <section className="mb-6 rounded-xl border border-primary/30 bg-card p-6 shadow-[0_0_60px_-25px] shadow-primary/50 sm:p-8">
+          <div className="flex items-center gap-3">
+            <SquareTerminal aria-hidden="true" className="size-5 text-primary" />
+            <h2 className="text-sm font-medium tracking-widest uppercase">
+              Terminal sign-in
+            </h2>
+          </div>
           {sessionState === "checking" ? (
             <p className="mt-4 flex items-center gap-2 text-sm text-muted-foreground" role="status">
               <LoaderCircle aria-hidden="true" className="size-4 animate-spin" />
@@ -260,7 +282,7 @@ export function SignInForm({
             </p>
           )}
           {handoffError && (
-            <p className="mt-4 text-sm text-destructive" role="alert">
+            <p className="mt-4 rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive" role="alert">
               {handoffError}
             </p>
           )}
@@ -275,27 +297,43 @@ export function SignInForm({
 
       <div
         className={
-          emailAuthEnabled ? "grid gap-8 md:grid-cols-2 md:gap-0" : "max-w-xl"
+          emailAuthEnabled ? "grid items-start gap-6 md:grid-cols-2" : "max-w-xl"
         }
       >
-      <section
-        className={`flex min-h-72 flex-col border border-border bg-card p-6 sm:p-8 ${emailAuthEnabled ? "md:border-r-0" : ""}`}
-      >
-        <div className="mb-8 flex items-center gap-3">
-          <CircleUserRound aria-hidden="true" className="size-5 text-primary" />
-          <h2 className="text-lg font-medium">GitHub</h2>
-        </div>
-        {githubFlow ? (
+      {githubFlow ? (
+        <section className="flex min-h-80 flex-col rounded-xl border border-border bg-card p-6 shadow-[0_0_60px_-30px] shadow-primary/30 sm:p-8">
+          <div className="mb-8 flex items-center gap-3">
+            <div className="flex size-9 items-center justify-center rounded-lg border border-border bg-background">
+              <GitHubLogo width="20px" height="20px" color="currentColor" className="text-primary" />
+            </div>
+            <h2 className="text-lg font-medium">GitHub</h2>
+          </div>
           <div className="flex flex-1 flex-col justify-between gap-6">
             <div>
               <p className="text-sm text-muted-foreground">
                 Copy this one-time code, then continue to GitHub.
               </p>
-              <p className="mt-5 font-mono text-3xl tracking-[0.18em] text-foreground">
-                {githubFlow.user_code}
-              </p>
+              <div className="mt-5 flex items-center justify-between gap-3 rounded-lg border border-dashed border-primary/40 bg-background px-4 py-3.5">
+                <p className="truncate font-mono text-3xl tracking-[0.18em] text-primary select-all">
+                  {githubFlow.user_code}
+                </p>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={copyCode}
+                  aria-live="polite"
+                >
+                  {codeStatus === "copied" ? (
+                    <CheckCircle2 aria-hidden="true" />
+                  ) : (
+                    <Copy aria-hidden="true" />
+                  )}
+                  {codeStatus === "copied" ? "Copied" : "Copy"}
+                </Button>
+              </div>
             </div>
-            <div className="space-y-3">
+            <div className="space-y-4">
               <a
                 className={buttonVariants({ className: "w-full" })}
                 href={githubFlow.verification_uri}
@@ -304,35 +342,41 @@ export function SignInForm({
               >
                 Open GitHub <ExternalLink aria-hidden="true" />
               </a>
-              <p className="flex items-center justify-center gap-2 text-xs text-muted-foreground" role="status">
-                <LoaderCircle aria-hidden="true" className="size-3 animate-spin" />
+              <p className="flex items-center justify-center gap-2 text-xs text-muted-foreground" role="status" aria-live="polite">
+                <LoaderCircle aria-hidden="true" className="size-3 animate-spin text-primary" />
                 Waiting for authorization
               </p>
             </div>
           </div>
-        ) : (
-          <div className="flex flex-1 flex-col justify-between gap-6">
-            <p className="max-w-sm text-sm leading-6 text-muted-foreground">
-              Connect your GitHub identity to submit scores and appear on the
-              leaderboard. No repository or email access is requested.
-            </p>
-            <Button onClick={startGithub} disabled={githubState === "starting"} className="w-full">
-              {githubState === "starting" && <LoaderCircle aria-hidden="true" className="animate-spin" />}
-              Continue with GitHub
-            </Button>
-          </div>
-        )}
-        {githubError && (
-          <p className="mt-4 text-sm text-destructive" role="alert">
-            {githubError}
-          </p>
-        )}
-      </section>
+        </section>
+      ) : (
+        <div className="flex justify-center">
+          <button
+            type="button"
+            onClick={startGithub}
+            disabled={githubState === "starting"}
+            className="inline-flex items-center gap-2.5 rounded-full border border-border bg-card py-1.5 pr-5 pl-4 text-sm font-medium shadow-sm transition-colors hover:border-primary/50 hover:bg-accent focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 outline-none disabled:pointer-events-none disabled:opacity-50"
+          >
+            <GitHubLogo width="22px" height="22px" color="currentColor" className="text-primary" />
+            {githubState === "starting" ? "Connecting..." : "Continue with GitHub"}
+            {githubState === "starting" && (
+              <LoaderCircle aria-hidden="true" className="size-4 animate-spin" />
+            )}
+          </button>
+        </div>
+      )}
+      {githubError && (
+        <p className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive md:col-span-2" role="alert">
+          {githubError}
+        </p>
+      )}
 
       {emailAuthEnabled && (
-        <section className="flex min-h-72 flex-col border border-border bg-card p-6 sm:p-8">
+        <section className="flex min-h-80 flex-col rounded-xl border border-border bg-card p-6 shadow-[0_0_60px_-30px] shadow-primary/30 sm:p-8">
         <div className="mb-8 flex items-center gap-3">
-          <Mail aria-hidden="true" className="size-5 text-primary" />
+          <div className="flex size-9 items-center justify-center rounded-lg border border-border bg-background">
+            <Mail aria-hidden="true" className="size-5 text-primary" />
+          </div>
           <h2 className="text-lg font-medium">Email</h2>
         </div>
         {emailState === "sent" ? (
@@ -369,7 +413,7 @@ export function SignInForm({
           </form>
         )}
         {emailError && (
-          <p className="mt-4 text-sm text-destructive" role="alert">
+          <p className="mt-4 rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive" role="alert">
             {emailError}
           </p>
         )}

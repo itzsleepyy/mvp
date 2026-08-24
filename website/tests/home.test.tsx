@@ -10,6 +10,10 @@ vi.mock("@/components/ascii-logo", () => ({
   default: () => <div data-testid="ascii-logo" />,
 }));
 
+vi.mock("next/navigation", () => ({
+  usePathname: () => "/",
+}));
+
 describe("homepage", () => {
   afterEach(() => vi.restoreAllMocks());
 
@@ -18,7 +22,7 @@ describe("homepage", () => {
 
     expect(screen.getByRole("heading", { name: "MVP" })).toBeInTheDocument();
     expect(screen.getByTestId("ascii-logo")).toBeInTheDocument();
-    expect(screen.getByText("npm install mvp")).toBeInTheDocument();
+    expect(screen.getByText("npx @mvp-play/cli")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Copy" })).toBeInTheDocument();
   });
 
@@ -31,7 +35,7 @@ describe("homepage", () => {
     render(<Home />);
 
     fireEvent.click(screen.getByRole("button", { name: "Copy" }));
-    expect(writeText).toHaveBeenCalledWith("npm install mvp");
+    expect(writeText).toHaveBeenCalledWith("npx @mvp-play/cli");
     expect(
       await screen.findByRole("button", { name: /copied/i }),
     ).toBeInTheDocument();
@@ -64,13 +68,10 @@ describe("homepage", () => {
       "href",
       "/leaderboard",
     );
-    const githubLinks = screen.getAllByRole("link", { name: "GitHub" });
-    expect(githubLinks).toHaveLength(2);
-    for (const link of githubLinks) {
-      expect(link).toHaveAttribute(
-        "href",
-        "https://github.com/itzsleepyy/waitstate",
-      );
-    }
+    const githubLink = screen.getByRole("link", { name: "GitHub" });
+    expect(githubLink).toHaveAttribute(
+      "href",
+      "https://github.com/itzsleepyy/waitstate",
+    );
   });
 });

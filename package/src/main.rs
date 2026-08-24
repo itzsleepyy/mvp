@@ -12,7 +12,7 @@ mod ui;
 
 use std::error::Error;
 use std::future::Future;
-use std::io;
+use std::io::{self, Write};
 use std::time::Instant;
 
 use clap::Parser;
@@ -136,6 +136,17 @@ async fn run_login(
             let flow = manager.start_github(false).await?;
             println!("Open {}", flow.verification_uri);
             println!("Enter GitHub code: {}", flow.user_code);
+            match copy_to_clipboard(&flow.user_code) {
+                true => println!("The code has been copied to your clipboard."),
+                false => println!("Copy the code above before continuing."),
+            }
+            print!(
+                "Press ENTER to open {} in your browser...",
+                flow.verification_uri
+            );
+            io::stdout().flush()?;
+            let mut line = String::new();
+            io::stdin().read_line(&mut line)?;
             if open::that(&flow.verification_uri).is_err() {
                 println!("The browser could not be opened automatically.");
             }
@@ -164,19 +175,51 @@ where
     F: PollingFlow,
 {
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(flow.expires_in());
-    let mut delay = std::time::Duration::from_secs(flow.interval().max(1));
     loop {
-        tokio::time::sleep(delay).await;
         if tokio::time::Instant::now() >= deadline {
             return Err(io::Error::other(format!("{label} expired; run `mvp login` again")).into());
         }
         match manager.poll_once(flow).await? {
             AuthFlow::Pending { retry_after } => {
-                delay = retry_after.max(std::time::Duration::from_secs(1));
+                tokio::time::sleep(retry_after.max(std::time::Duration::from_secs(1))).await;
             }
             AuthFlow::Complete(session) => return Ok(session),
         }
     }
+}
+
+fn copy_to_clipboard(text: &str) -> bool {
+    let candidates: &[(&str, &[&str])] = if cfg!(target_os = "macos") {
+        &[("pbcopy", &[])]
+    } else if cfg!(target_os = "windows") {
+        &[("clip", &[])]
+    } else {
+        &[
+            ("wl-copy", &[]),
+            ("xclip", &["-selection", "clipboard"]),
+            ("xsel", &["--clipboard", "--input"]),
+        ]
+    };
+    for (program, args) in candidates {
+        let result = std::process::Command::new(program)
+            .args(*args)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .and_then(|mut child| {
+                child
+                    .stdin
+                    .take()
+                    .ok_or_else(|| io::Error::other("missing stdin"))?
+                    .write_all(text.as_bytes())?;
+                child.wait()
+            });
+        if result.is_ok_and(|status| status.success()) {
+            return true;
+        }
+    }
+    false
 }
 
 fn redact_email(email: &str) -> String {

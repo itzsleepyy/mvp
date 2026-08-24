@@ -466,39 +466,49 @@ fn stack_hud(game: &StackOverflow, app: &App) -> Line<'static> {
     ])
 }
 
+/// Basic ANSI colors cycled by absolute layer depth. These render on every
+/// terminal, unlike 256-color indexed shades which silently degrade.
+const LAYER_COLORS: [Color; 8] = [
+    Color::Red,
+    Color::Yellow,
+    Color::Green,
+    Color::Cyan,
+    Color::Blue,
+    Color::Magenta,
+    Color::LightRed,
+    Color::LightCyan,
+];
+
 /// The stacker's body: the tower, the sliding block and the direction
 /// arrow. The tower scrolls: only the layers near the top are visible.
 fn render_stack_body(buf: &mut Buffer, area: Rect, game: &StackOverflow) {
-    let layers = game.layers();
-    // The sliding block floats one row above the top layer; when the stack
-    // fills the playfield it stays at a fixed row near the top.
+    let all_layers = game.layers();
     let visible = (area.height.saturating_sub(2)) as usize;
-    let layers: Vec<&crate::game::stack_overflow::Layer> =
-        layers.iter().rev().take(visible).collect();
-    let block_row = area.bottom() - 1 - 2; // ground row + one spare row
+    let skip = all_layers.len().saturating_sub(visible);
+    let shown = &all_layers[skip..];
 
     let dim = Style::new().fg(Color::DarkGray);
-    let block_style = Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD);
+    let block_style = Style::new().fg(Color::White).add_modifier(Modifier::BOLD);
 
     // Ground line.
     for x in area.left()..area.right() {
         buf[(x, area.bottom() - 1)].set_symbol("─").set_style(dim);
     }
 
-    // The stack, bottom layers first so the newest sits on top.
-    for (i, layer) in layers.iter().rev().enumerate() {
-        let row = area.bottom() - 2 - i as u16;
-        let age = layers.len() - 1 - i; // 0 = oldest visible
-        let style = if age == 0 {
-            Style::new().fg(Color::White)
-        } else {
-            let shade = 232 + (age % 12) as u8;
-            Style::new().fg(Color::Indexed(shade))
-        };
+    // The stack, bottom layers first so the newest sits on top. Depth is
+    // counted from the absolute bottom of the tower so the color pattern
+    // stays stable while the viewport scrolls.
+    let base_row = area.bottom().saturating_sub(2);
+    for (i, layer) in shown.iter().enumerate() {
+        let row = base_row.saturating_sub(i as u16);
+        let depth = skip + i;
+        let style = Style::new().fg(LAYER_COLORS[depth % LAYER_COLORS.len()]);
         fill_row(buf, area, row, layer.left, layer.width, "█", style);
     }
 
-    // The sliding block above the top layer, with a direction arrow.
+    // The sliding block floats one row above the newest layer, rising with
+    // the stack until the playfield fills up.
+    let block_row = base_row.saturating_sub(shown.len() as u16);
     let top = game.top_layer();
     let offset = game.block_offset().round() as i32;
     let arrow = if game.direction() > 0 { ">" } else { "<" };

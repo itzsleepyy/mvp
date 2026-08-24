@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { cn } from "@/lib/utils";
 import { buttonVariants } from "@/components/ui/button";
+import { PeriodSelect } from "@/components/period-select";
 import {
   Avatar,
   AvatarFallback,
@@ -16,7 +17,6 @@ import {
 } from "@/components/ui/table";
 import {
   GAME_IDS,
-  PERIODS,
   leaderboardHref,
   type GameFilter,
   type Leaderboard,
@@ -129,39 +129,32 @@ export function LeaderboardView({
             <h1 className="font-pixelify text-5xl leading-none text-foreground sm:text-6xl">
               {title}
             </h1>
-            <p className="text-sm text-muted-foreground">
-              {board ? formatDate(board.through) : "Live MVP points"}
-            </p>
+            {board ? (
+              <p className="text-sm text-muted-foreground">
+                {formatDate(board.through)}
+              </p>
+            ) : null}
           </div>
         </header>
 
-        <nav aria-label="Leaderboard period" className="flex flex-wrap gap-1">
-          {PERIODS.map((item) => (
-            <FilterLink
-              key={item}
-              href={leaderboardHref(item, item === "weekly" ? "overall" : game)}
-              active={period === item}
-            >
-              {periodLabels[item]}
-            </FilterLink>
-          ))}
-        </nav>
-
-        <nav aria-label="Leaderboard game" className="flex flex-wrap gap-1">
-          {GAME_IDS.map((item) => {
-            const targetPeriod =
-              period === "weekly" && item !== "overall" ? "all-time" : period;
-            return (
-              <FilterLink
-                key={item}
-                href={leaderboardHref(targetPeriod, item)}
-                active={game === item}
-              >
-                {gameLabels[item]}
-              </FilterLink>
-            );
-          })}
-        </nav>
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <nav aria-label="Leaderboard game" className="flex flex-wrap gap-1">
+            {GAME_IDS.map((item) => {
+              const targetPeriod =
+                period === "weekly" && item !== "overall" ? "all-time" : period;
+              return (
+                <FilterLink
+                  key={item}
+                  href={leaderboardHref(targetPeriod, item)}
+                  active={game === item}
+                >
+                  {gameLabels[item]}
+                </FilterLink>
+              );
+            })}
+          </nav>
+          <PeriodSelect period={period} game={game} />
+        </div>
 
         {unavailable ? (
           <StateCard

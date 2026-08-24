@@ -130,7 +130,6 @@ pub trait PollingFlow {
     fn poll_token(&self) -> &str;
     fn poll_path(&self) -> &'static str;
     fn expires_in(&self) -> u64;
-    fn interval(&self) -> u64;
 }
 
 impl PollingFlow for BrowserFlow {
@@ -144,10 +143,6 @@ impl PollingFlow for BrowserFlow {
 
     fn expires_in(&self) -> u64 {
         self.expires_in
-    }
-
-    fn interval(&self) -> u64 {
-        self.interval
     }
 }
 
@@ -163,10 +158,6 @@ impl PollingFlow for DeviceFlow {
     fn expires_in(&self) -> u64 {
         self.expires_in
     }
-
-    fn interval(&self) -> u64 {
-        self.interval
-    }
 }
 
 impl PollingFlow for EmailFlow {
@@ -180,10 +171,6 @@ impl PollingFlow for EmailFlow {
 
     fn expires_in(&self) -> u64 {
         self.expires_in
-    }
-
-    fn interval(&self) -> u64 {
-        self.interval
     }
 }
 
