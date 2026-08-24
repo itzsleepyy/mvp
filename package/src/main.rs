@@ -140,7 +140,10 @@ async fn run_login(
                 true => println!("The code has been copied to your clipboard."),
                 false => println!("Copy the code above before continuing."),
             }
-            print!("Press ENTER to open {} in your browser...", flow.verification_uri);
+            print!(
+                "Press ENTER to open {} in your browser...",
+                flow.verification_uri
+            );
             io::stdout().flush()?;
             let mut line = String::new();
             io::stdin().read_line(&mut line)?;
