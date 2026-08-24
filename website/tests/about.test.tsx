@@ -13,7 +13,7 @@ describe("about page", () => {
     for (const title of ["Stack Overflow", "The Daily PR", "The Daily Fix"]) {
       expect(screen.getByRole("heading", { name: title })).toBeInTheDocument();
     }
-    expect(screen.getByText("npm install mvp")).toBeInTheDocument();
+    expect(screen.getByText("npx @mvp-play/cli")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Copy" })).toBeInTheDocument();
   });
 

@@ -4,7 +4,7 @@ import { useState } from "react";
 import { Check, Copy } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
-export const INSTALL_COMMAND = "npm install mvp";
+export const INSTALL_COMMAND = "npx @mvp-play/cli";
 
 export function InstallPill() {
   const [status, setStatus] = useState<"idle" | "copied" | "failed">("idle");

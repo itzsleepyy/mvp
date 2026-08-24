@@ -1,7 +1,13 @@
-import { render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { fireEvent, render, screen } from "@testing-library/react";
+import { describe, expect, it, vi } from "vitest";
 import { LeaderboardLoading, LeaderboardView } from "@/components/leaderboard";
 import type { Leaderboard } from "@/lib/api";
+
+const push = vi.fn();
+
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ push }),
+}));
 
 const board: Leaderboard = {
   period: "daily",
@@ -71,20 +77,22 @@ describe("leaderboard", () => {
     expect(screen.getByText(/played locally/i)).toBeInTheDocument();
   });
 
-  it("uses URL-backed period and game filters", () => {
+  it("uses a URL-backed period select and game filter links", async () => {
     render(<LeaderboardView board={board} period="daily" game="overall" />);
 
-    expect(screen.getByRole("link", { name: "Weekly" })).toHaveAttribute(
-      "href",
-      "/leaderboard?period=weekly",
-    );
-    expect(screen.getByRole("link", { name: "Stack Overflow" })).toHaveAttribute(
-      "href",
-      "/leaderboard?period=daily&game=stack_overflow",
-    );
-    expect(screen.getByRole("link", { name: "Daily" })).toHaveAttribute(
-      "aria-current",
-      "page",
-    );
+    const trigger = screen.getByRole("combobox", {
+      name: "Leaderboard period",
+    });
+    expect(trigger).toHaveTextContent("Daily");
+    expect(
+      screen.getByRole("link", { name: "Stack Overflow" }),
+    ).toHaveAttribute("href", "/leaderboard?period=daily&game=stack_overflow");
+
+    fireEvent.click(trigger);
+    const option = await screen.findByRole("option", { name: "Weekly" });
+    fireEvent.pointerDown(option);
+    fireEvent.pointerUp(option);
+    fireEvent.click(option);
+    expect(push).toHaveBeenCalledWith("/leaderboard?period=weekly");
   });
 });

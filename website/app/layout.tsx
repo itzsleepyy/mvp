@@ -1,11 +1,11 @@
 import type { Metadata } from "next";
-import { Pixelify_Sans, Geist } from "next/font/google";
+import { Pixelify_Sans, Space_Grotesk } from "next/font/google";
 import { Footer } from "@/components/footer";
 import { Navbar } from "@/components/navbar";
 import "./globals.css";
 import { cn } from "@/lib/utils";
 
-const geist = Geist({
+const spaceGrotesk = Space_Grotesk({
   subsets: ["latin"],
   variable: "--font-sans",
   display: "swap",
@@ -53,9 +53,9 @@ export default function RootLayout({
   return (
     <html
       lang="en"
-      className={cn(geist.variable, pixelify.variable, "font-sans")}
+      className={cn(spaceGrotesk.variable, pixelify.variable, "font-sans")}
     >
-      <body>
+      <body className="flex min-h-dvh flex-col">
         <a className="skip-link" href="#main-content">
           Skip to content
         </a>

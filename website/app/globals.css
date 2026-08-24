@@ -120,6 +120,16 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
+body > main {
+  flex: 1 0 auto;
+  display: flex;
+  flex-direction: column;
+}
+
+body > main > * {
+  margin-block: auto;
+}
+
 @layer base {
   a {
     color: inherit;
@@ -199,5 +209,141 @@ button:focus-visible {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
+  }
+}
+
+/* Transitions.dev — Tabs sliding */
+
+/*
+  Usage: the navbar pill. Tabs sit on z-index: 1, the sliding
+  pill on z-index: 0, so labels read above the pill background.
+  offsetLeft / offsetWidth of the active tab are written inline
+  by components/nav-links.tsx.
+*/
+
+:root {
+  --tabs-dur: 250ms;
+  --tabs-ease: cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.nav-tabs {
+  position: relative;
+}
+
+.nav-tabs-item {
+  position: relative;
+  z-index: 1;
+  transition: color var(--tabs-dur) var(--tabs-ease);
+}
+
+.nav-tabs-pill {
+  position: absolute;
+  top: 4px;
+  left: 0;
+  height: calc(100% - 8px);
+  width: 0;
+  background: var(--secondary);
+  border-radius: 48px;
+  transform: translateX(0);
+  transition:
+    transform var(--tabs-dur) var(--tabs-ease),
+    width var(--tabs-dur) var(--tabs-ease);
+  will-change: transform, width;
+  z-index: 0;
+  pointer-events: none;
+}
+
+.nav-tabs-pill[data-visible="false"] {
+  opacity: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .nav-tabs-pill,
+  .nav-tabs-item {
+    transition: none !important;
+  }
+}
+
+/* Transitions.dev — Accordion expand */
+
+/*
+  Usage: the leaderboard period select's dropdown panel. The
+  panel animates via grid-template-rows 0fr <-> 1fr (no JS
+  height measuring); the inner element clips overflow, and the
+  chevron flips vertically (scaleY) from a "v" to a "^".
+  data-open / data-closed come from Base UI's popup state.
+*/
+
+:root {
+  --acc-expand: 250ms;
+  --acc-collapse: 250ms;
+  --acc-chevron: 250ms;
+  --acc-ease: cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.t-acc-panel {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows var(--acc-collapse) var(--acc-ease);
+}
+
+.t-acc-panel[data-open] {
+  grid-template-rows: 1fr;
+  transition: grid-template-rows var(--acc-expand) var(--acc-ease);
+}
+
+.t-acc-panel[data-open][data-starting-style] {
+  grid-template-rows: 0fr;
+}
+
+.t-acc-panel[data-closed] {
+  grid-template-rows: 0fr;
+  transition: grid-template-rows var(--acc-collapse) var(--acc-ease);
+}
+
+.t-acc-panel-inner {
+  overflow: hidden;
+  opacity: 0;
+  filter: blur(2px);
+  transition:
+    opacity var(--acc-collapse) var(--acc-ease),
+    filter var(--acc-collapse) var(--acc-ease);
+}
+
+.t-acc-panel[data-open] .t-acc-panel-inner {
+  opacity: 1;
+  filter: blur(0);
+  transition:
+    opacity var(--acc-expand) var(--acc-ease),
+    filter var(--acc-expand) var(--acc-ease);
+}
+
+.t-acc-panel[data-open][data-starting-style] .t-acc-panel-inner {
+  opacity: 0;
+  filter: blur(2px);
+}
+
+.t-acc-chevron {
+  display: inline-flex;
+  transform: scaleY(1);
+  transform-origin: center;
+  transition: transform var(--acc-chevron) var(--acc-ease);
+}
+
+.t-acc-chevron path {
+  vector-effect: non-scaling-stroke;
+}
+
+[data-slot="select-trigger"][data-open] .t-acc-chevron {
+  transform: scaleY(-1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .t-acc-panel,
+  .t-acc-panel-inner,
+  .t-acc-chevron,
+  .nav-tabs-pill,
+  .nav-tabs-item {
+    transition: none !important;
   }
 }

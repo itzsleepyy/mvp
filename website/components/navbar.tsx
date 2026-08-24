@@ -1,43 +1,24 @@
 import Link from "next/link";
-import { AuthNav } from "@/components/auth-nav";
-
-const REPOSITORY = "https://github.com/itzsleepyy/waitstate";
+import { NavbarBackdrop } from "@/components/navbar-backdrop";
+import { NavLinks } from "@/components/nav-links";
+import { StatusPill } from "@/components/status-pill";
 
 export function Navbar() {
   return (
-    <header className="sticky top-0 z-50 border-b border-border bg-background/80 backdrop-blur-md">
-      <div className="mx-auto flex h-14 w-full max-w-5xl items-center justify-between px-2 sm:px-6">
+    <header className="sticky top-0 z-50 h-14">
+      <NavbarBackdrop />
+      <div className="mx-auto grid h-full w-full max-w-5xl grid-cols-[1fr_auto_1fr] items-center px-4 pt-3 sm:px-6">
         <Link
           href="/"
-          className="font-pixelify text-xl leading-none tracking-wide text-foreground"
+          className="justify-self-start font-pixelify text-2xl leading-none tracking-wide text-foreground sm:text-3xl"
           aria-label="MVP home"
         >
           MVP
         </Link>
-        <nav
-          className="flex min-w-0 items-center gap-2 text-[11px] text-muted-foreground sm:gap-6 sm:text-sm"
-          aria-label="Primary navigation"
-        >
-          <Link
-            href="/about"
-            className="transition-colors hover:text-foreground"
-          >
-            About
-          </Link>
-          <Link
-            href="/leaderboard"
-            className="transition-colors hover:text-foreground"
-          >
-            Leaderboard
-          </Link>
-          <a
-            href={REPOSITORY}
-            className="transition-colors hover:text-foreground"
-          >
-            GitHub
-          </a>
-          <AuthNav />
-        </nav>
+        <NavLinks />
+        <div className="justify-self-end">
+          <StatusPill />
+        </div>
       </div>
     </header>
   );

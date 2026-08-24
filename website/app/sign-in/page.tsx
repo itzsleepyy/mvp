@@ -39,14 +39,21 @@ export default async function SignInPage({
   const cli = Array.isArray(params.cli) ? params.cli[0] : params.cli;
 
   return (
-    <main id="main-content">
-      <div className="mx-auto w-full max-w-4xl px-4 py-14 sm:px-6 sm:py-20">
-        <header className="mb-10 max-w-xl">
+    <main id="main-content" className="relative overflow-hidden">
+      <div
+        aria-hidden="true"
+        className="pointer-events-none absolute inset-x-0 top-0 -z-10 h-[420px] bg-[radial-gradient(ellipse_60%_100%_at_50%_0%,--alpha(var(--primary)/12%),transparent_70%)]"
+      />
+      <div className="mx-auto w-full max-w-xl px-4 py-14 sm:px-6 sm:py-24">
+        <header className="mb-10 text-center">
           <p className="text-xs tracking-widest text-primary uppercase">Account</p>
           <h1 className="mt-2 font-pixelify text-5xl leading-none sm:text-6xl">
             Sign in to MVP
+            <span aria-hidden="true" className="ml-2 animate-pulse text-primary">
+              _
+            </span>
           </h1>
-          <p className="mt-5 text-sm leading-6 text-muted-foreground">
+          <p className="mx-auto mt-5 max-w-sm text-sm leading-6 text-muted-foreground">
             Keep your terminal scores connected across machines and compete on
             the global leaderboard.
           </p>
