@@ -10,6 +10,11 @@ import { migrate } from "../src/migrate.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL ?? "";
 
+type GithubPollResponse =
+  | { status: "pending" }
+  | { status: "slow_down" }
+  | { status: "complete"; accessToken: string };
+
 describe.skipIf(!databaseUrl)("database API", () => {
   let db: pg.Pool;
   let app: FastifyInstance;
@@ -17,6 +22,7 @@ describe.skipIf(!databaseUrl)("database API", () => {
   let now = initialNow;
   let verificationToken = "";
   let verificationHandoff = "";
+  let githubPollResponses: GithubPollResponse[] = [];
 
   beforeAll(async () => {
     if (new URL(databaseUrl).pathname.replace(/^\//, "") !== "mvp_test")
@@ -55,10 +61,12 @@ describe.skipIf(!databaseUrl)("database API", () => {
             interval: 5,
           }),
         poll: () =>
-          Promise.resolve({
-            status: "complete" as const,
-            accessToken: "github-access-token",
-          }),
+          Promise.resolve(
+            githubPollResponses.shift() ?? {
+              status: "complete" as const,
+              accessToken: "github-access-token",
+            },
+          ),
         user: () =>
           Promise.resolve({
             id: 42,
@@ -73,6 +81,7 @@ describe.skipIf(!databaseUrl)("database API", () => {
     now = initialNow;
     verificationToken = "";
     verificationHandoff = "";
+    githubPollResponses = [];
     await db.query(
       "TRUNCATE game_runs, login_handoffs, email_auth_flows, github_device_flows, auth_identities, sessions, users CASCADE",
     );
@@ -133,6 +142,73 @@ describe.skipIf(!databaseUrl)("database API", () => {
         )
       ).rowCount,
     ).toBe(1);
+  });
+
+  it("paces GitHub Device Flow polls while authorization is pending", async () => {
+    githubPollResponses.push({ status: "pending" });
+    const started = await app.inject({
+      method: "POST",
+      url: "/v1/auth/github/device",
+    });
+    expect(started.statusCode).toBe(201);
+    const flow = started.json<{ flow_token: string }>();
+
+    now = new Date(initialNow.getTime() + 5_000);
+    const pending = await app.inject({
+      method: "POST",
+      url: "/v1/auth/github/poll",
+      payload: { poll_token: flow.flow_token },
+    });
+    expect(pending.statusCode).toBe(202);
+    expect(pending.json()).toEqual({ status: "pending", retry_after: 5 });
+    const paced = await db.query<{ next_poll_at: Date }>(
+      "SELECT next_poll_at FROM github_device_flows",
+    );
+    expect(paced.rows[0]?.next_poll_at.getTime()).toBe(
+      initialNow.getTime() + 10_000,
+    );
+
+    now = new Date(initialNow.getTime() + 10_000);
+    githubPollResponses.push({
+      status: "complete",
+      accessToken: "github-access-token",
+    });
+    const completed = await app.inject({
+      method: "POST",
+      url: "/v1/auth/github/poll",
+      payload: { poll_token: flow.flow_token },
+    });
+    expect(completed.statusCode).toBe(200);
+    expect(completed.json<{ user: { username: string } }>().user.username).toBe(
+      "octocat",
+    );
+  });
+
+  it("slows down GitHub Device Flow polling after GitHub reports slow_down", async () => {
+    githubPollResponses.push({ status: "slow_down" });
+    const started = await app.inject({
+      method: "POST",
+      url: "/v1/auth/github/device",
+    });
+    expect(started.statusCode).toBe(201);
+    const flow = started.json<{ flow_token: string }>();
+
+    now = new Date(initialNow.getTime() + 5_000);
+    const slowed = await app.inject({
+      method: "POST",
+      url: "/v1/auth/github/poll",
+      payload: { poll_token: flow.flow_token },
+    });
+    expect(slowed.statusCode).toBe(202);
+    expect(slowed.json()).toEqual({ status: "pending", retry_after: 10 });
+    const rows = await db.query<{
+      interval_seconds: number;
+      next_poll_at: Date;
+    }>("SELECT interval_seconds, next_poll_at FROM github_device_flows");
+    expect(rows.rows[0]?.interval_seconds).toBe(10);
+    expect(rows.rows[0]?.next_poll_at.getTime()).toBe(
+      initialNow.getTime() + 15_000,
+    );
   });
 
   it("completes and replays a hashed email magic-link flow", async () => {
