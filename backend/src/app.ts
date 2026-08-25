@@ -542,7 +542,7 @@ export async function buildApp(options: AppOptions) {
       const current = now();
       const claimed = await db.query<HandoffRow>(
         `UPDATE login_handoffs
-         SET next_poll_at = $2 + interval_seconds * interval '1 second'
+         SET next_poll_at = $2::timestamptz + interval_seconds * interval '1 second'
          WHERE poll_token_hash = $1 AND completed_user_id IS NULL
            AND next_poll_at <= $2 AND expires_at > $2
          RETURNING poll_token_hash, interval_seconds, next_poll_at, expires_at,
@@ -646,7 +646,7 @@ export async function buildApp(options: AppOptions) {
         };
       };
       const claimed = await db.query<FlowRow>(
-        `UPDATE github_device_flows SET next_poll_at = $2 + interval '120 seconds'
+        `UPDATE github_device_flows SET next_poll_at = $2::timestamptz + interval '120 seconds'
          WHERE poll_token_hash = $1 AND next_poll_at <= $2 AND expires_at > $2
          RETURNING device_code, interval_seconds, next_poll_at, expires_at,
                    completed_user_id, completed_session_expires_at`,
@@ -694,7 +694,7 @@ export async function buildApp(options: AppOptions) {
       if (polled.status === "pending") {
         await db.query(
           `UPDATE github_device_flows
-           SET next_poll_at = $2 + interval_seconds * interval '1 second'
+           SET next_poll_at = $2::timestamptz + interval_seconds * interval '1 second'
            WHERE poll_token_hash = $1`,
           [tokenHash, now()],
         );
@@ -705,7 +705,7 @@ export async function buildApp(options: AppOptions) {
       if (polled.status === "slow_down") {
         await db.query(
           `UPDATE github_device_flows SET interval_seconds = interval_seconds + 5,
-            next_poll_at = $2 + (interval_seconds + 5) * interval '1 second'
+            next_poll_at = $2::timestamptz + (interval_seconds + 5) * interval '1 second'
             WHERE poll_token_hash = $1`,
           [tokenHash, now()],
         );
@@ -1074,7 +1074,7 @@ export async function buildApp(options: AppOptions) {
       const current = now();
       const claimed = await db.query<EmailFlowRow>(
         `UPDATE email_auth_flows
-         SET next_poll_at = $2 + interval_seconds * interval '1 second'
+         SET next_poll_at = $2::timestamptz + interval_seconds * interval '1 second'
          WHERE poll_token_hash = $1 AND next_poll_at <= $2 AND expires_at > $2
          RETURNING poll_token_hash, email_normalized, interval_seconds,
                    next_poll_at, expires_at, completed_user_id,
